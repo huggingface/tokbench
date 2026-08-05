@@ -44,34 +44,68 @@ The contract is written out in full at the top of [`core/src/lib.rs`](core/src/l
 
 ## Results are only as honest as their caveats
 
-**7 models × 10 languages = 70 cells**, every engine, single thread, median of 5,
-warm cache, `add_special_tokens = false`, Apple M-series (10 P-cores).
+Cross-engine medians are computed **only over cells every compared engine ran
+and verified**. That matters more than it sounds: engines cover different model
+families, so a median over each engine's own cells silently rewards the ones
+that skip the hard cases. Measured effect of getting this wrong: pipeline 1.41×
+understated, executorch 1.82× overstated.
 
-| engine | cells | ids match | ids differ | median MB/s | × ref | RSS | package |
+### The ranking — 12 engines over the 12 cells all of them verify
+
+llama-3 × {arabic, chinese, code, english, greek, hindi, thai} and
+mistral-nemo × {chinese, code, english, greek, korean}. Single thread, median
+of 5, warm, `add_special_tokens = false`, Apple M-series.
+
+| engine | median MB/s | × ref | min | max |
+|---|---:|---:|---:|---:|
+| pipeline ([#2279](https://github.com/huggingface/tokenizers/pull/2279)) | **755.9** | 62.8× | 322 | 1175 |
+| gigatoken | 605.6 | 48.9× | 334 | 1290 |
+| wordchipper | 104.7 | 6.4× | 11 | 212 |
+| iree | 77.4 | 7.0× | 34 | 104 |
+| fastokens | 68.1 | 6.0× | 45 | 77 |
+| ai-tokenizer (JS) | 59.1 | 4.4× | 36 | 105 |
+| tokie | 36.8 | 2.9× | 15 | 121 |
+| tiktoken | 33.6 | 2.7× | 20 | 43 |
+| kitoken | 31.7 | 2.6× | 18 | 40 |
+| tokenizers 0.23.1 (reference) | 12.4 | 1.0× | 6 | 23 |
+| llamacpp | 6.4 | 0.4× | 2 | 18 |
+| executorch | 2.1 | 0.2× | 2 | 4 |
+
+minbpe and mistral-common are excluded from this table: each supports only one
+model, and including them would collapse the common set to zero cells. Their
+own-cells figures are below.
+
+### Coverage — what each engine can actually do
+
+This is the other half of the picture, and the two must be read together: an
+engine high in the table above may be there partly because it declines the
+hard cells.
+
+| engine | cells run | ids match | ids differ | unsupported | own-cells median | RSS | package |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| gigatoken | 50 | 50 | 0 | **605.6** | 55.3× | 89 MB | 5230 kB |
-| pipeline ([#2279](https://github.com/huggingface/tokenizers/pull/2279)) | 70 | 62 | 8 | **501.8** | 45.0× | 63 MB | — |
-| wordchipper | 30 | 29 | 1 | 78.6 | 5.8× | 105 MB | 259 kB |
-| tokie | 70 | 52 | 18 | 70.0 | 3.6× | 44 MB | 181 kB |
-| fastokens | 40 | 40 | 0 | 67.9 | 5.3× | 153 MB | 690 kB |
-| ai-tokenizer (JS) | 30 | 30 | 0 | 59.5 | 4.6× | — | 31133 kB |
-| iree | 70 | 37 | 33 | 56.9 | 6.7× | 15 MB | — |
-| tiktoken | 30 | 30 | 0 | 31.9 | 2.5× | 34 MB | 3699 kB |
-| kitoken | 70 | **70** | 0 | 29.6 | 2.4× | 23 MB | 63 kB |
-| mistral-common (Py) | 10 | 10 | 0 | 13.6 | 1.1× | — | 6400 kB |
-| tokenizers 0.23.1 (reference) | 70 | — | — | 12.2 | 1.0× | 40 MB | 192 kB |
-| blingfire | 10 | 0 | **10** | 7.8 | — | 2 MB | 3 kB |
-| llamacpp | 60 | 47 | 13 | 7.0 | 0.5× | 31 MB | 215 kB |
-| executorch | 40 | 40 | 0 | 3.9 | 0.3× | 47 MB | 1532 kB |
-| minbpe (Py) | 10 | 10 | 0 | 1.0 | 0.1× | — | — |
+| kitoken | 70 | **70** | 0 | 0 | 29.6 | 23 MB | **63 kB** |
+| tokenizers 0.23.1 (ref) | 70 | — | — | 0 | 12.2 | 40 MB | 192 kB |
+| pipeline | 70 | 62 | 8 | 0 | 535.1 | 63 MB | — |
+| tokie | 70 | 52 | 18 | 0 | 44.6 | 44 MB | 181 kB |
+| iree | 70 | 37 | 33 | 0 | 72.2 | 15 MB | — |
+| llamacpp | 60 | 47 | 13 | 10 | 6.6 | 31 MB | 215 kB |
+| gigatoken | 50 | 50 | 0 | 20 | 605.6 | 89 MB | 5230 kB |
+| fastokens | 40 | 40 | 0 | 30 | 67.9 | 153 MB | 690 kB |
+| executorch | 40 | 40 | 0 | 30 | 3.9 | 47 MB | 1532 kB |
+| tiktoken | 30 | 30 | 0 | 40 | 31.9 | 34 MB | 3699 kB |
+| ai-tokenizer | 30 | 30 | 0 | 40 | 59.5 | — | 31133 kB |
+| wordchipper | 30 | 29 | 1 | 40 | 78.1 | 105 MB | 259 kB |
+| mistral-common | 10 | 10 | 0 | 60 | 13.6 | — | 6400 kB |
+| minbpe | 10 | 10 | 0 | 60 | 1.0 | — | — |
+| blingfire | 10 | 0 | **10** | 60 | 7.8 | 2 MB | 3 kB |
 
-`× ref` is the median over **verified cells only** — a mismatched cell contributes
-nothing, because it is not the same computation.
+**own-cells median is NOT cross-comparable** — it is each engine measured on
+whatever subset it supports. Use the ranking table for comparisons.
 
 **kitoken is the only engine besides the reference that runs all 70 cells with
-correct ids**, covering BPE, Unigram and WordPiece, at 2.4× the reference, the
-smallest package (63 kB) and 23 MB resident. Every faster engine buys its speed
-by supporting less.
+correct ids**, covering BPE, Unigram and WordPiece, at 2.6× the reference with
+the smallest package in the set. Every engine above it in the ranking buys its
+speed by supporting less.
 
 ### pipeline vs gigatoken
 
