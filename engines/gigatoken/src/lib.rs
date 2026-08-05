@@ -57,12 +57,16 @@
 //!   `encode` calls. `tokbench_core::measure` walks the whole corpus once
 //!   untimed before the clock starts, so the timed passes always see a warm
 //!   cache — the regime a real `for doc in corpus` loop reaches, and the one
-//!   every number from this engine describes. Be careful with the contrast:
-//!   `--no-warmup` does NOT produce a cold number here, because that branch of
-//!   `measure` still makes a full pass to collect ids for verification, which
-//!   fills the cache just as thoroughly (measured on gpt2/english: 1401 MB/s
-//!   `--no-warmup` vs 1372 MB/s warm — noise). A genuinely cold figure would
-//!   need a fresh engine for each timed pass, which the harness does not do.
+//!   every number from this engine describes. `--no-warmup` gives the cold
+//!   contrast.
+//!
+//!   That was not true when this engine was first wired, and the bug was found
+//!   here because this is the engine it distorted most: both branches of
+//!   `measure` were byte-for-byte identical, so the "cold" path still made a
+//!   full id-collecting pass that filled the cache before the clock started
+//!   (gpt2/english measured 1401 MB/s `--no-warmup` against 1372 MB/s warm —
+//!   noise, when the true gap should be large). `measure` now times only the
+//!   first pass when warm-up is off, and collects ids afterwards.
 //!
 //! # Why `encode_with_added_tokens_flat` and not `memoized_encode_flat`
 //!
