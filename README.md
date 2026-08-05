@@ -147,9 +147,9 @@ roughly halves wall time).
 
 ## The engines
 
-Status is stated plainly. "Scaffolded" means the folder holds the integration
-contract and an explicit `Unsupported` reason — not a guess dressed up as a
-measurement.
+All sixteen are wired. Where an engine cannot run a cell it returns an explicit
+`Unsupported` with the reason, and where its ids disagree with the reference the
+cell is marked `differ` and excluded from every ranking.
 
 | engine | language | class | status |
 |---|---|---|---|
@@ -161,15 +161,15 @@ measurement.
 | [fastokens](engines/fastokens) | Rust | native | **wired** — rejects tokenizer.json without `model.type` |
 | [rust-gems-bpe](engines/rust-gems-bpe) | Rust | native | **wired** — cl100k/o200k only, see note below |
 | [sentencepiece](engines/sentencepiece) | C++ | cffi | **wired** — needs `spiece.model`, builds libsentencepiece statically |
-| [wordchipper](engines/wordchipper) | Rust | native | scaffolded — needs an explicit `SpanEncoderSelector` |
-| [gigatoken](engines/gigatoken) | Rust | native | scaffolded — pin a git rev; watch its thread count |
-| [blingfire](engines/blingfire) | C++ | cffi | scaffolded — needs `TextToIds`, **not** the `blingfire` crate |
-| [llamacpp](engines/llamacpp) | C++ | cffi | scaffolded — needs a vocab-only GGUF |
-| [iree](engines/iree) | C | cffi | scaffolded — best-matched foreign engine, reads tokenizer.json |
-| [executorch](engines/executorch) | C++ | cffi | scaffolded — use `HFTokenizer`, name the variant |
-| [minbpe](engines/minbpe) | Python | subprocess | runner written — the *floor*, not a competitor |
-| [mistral-common](engines/mistral-common) | Python | subprocess | runner written — needs `tekken.json` |
-| [ai-tokenizer](engines/ai-tokenizer) | JS | subprocess | runner written — needs a named encoding |
+| [wordchipper](engines/wordchipper) | Rust | native | **wired** — 29/30 verified; `BpeBacktrack` selector, named in `version` |
+| [gigatoken](engines/gigatoken) | Rust | native | **wired** — 50/50 verified; needs nightly + `-Z profile-rustflags`, links libpython |
+| [blingfire](engines/blingfire) | C++ | cffi | **wired** — runs, but 0/10 verified: its GPT-2 model emits no whitespace tokens |
+| [llamacpp](engines/llamacpp) | C++ | cffi | **wired** — 47/60 verified; slower than HF on every verified byte-level BPE |
+| [iree](engines/iree) | C | cffi | **wired** — gpt2 10/10 byte-exact; 841 kB static lib, 9.6 s build, no CMake |
+| [executorch](engines/executorch) | C++ | cffi | **wired** — 40/40 verified; must run in its own process (PCRE2 clash with fastokens) |
+| [minbpe](engines/minbpe) | Python | subprocess | **wired** — 10/10 verified; the *floor*, not a competitor |
+| [mistral-common](engines/mistral-common) | Python | subprocess | **wired** — 10/10 verified (needs `tekken.json`) |
+| [ai-tokenizer](engines/ai-tokenizer) | JS | subprocess | **wired** — 30/30 verified; builds its Encoding from `ranks.tiktoken` |
 
 ### The controlled comparison
 
