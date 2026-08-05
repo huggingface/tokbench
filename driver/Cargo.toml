@@ -22,6 +22,7 @@ open = "5"
 # also keeps a broken third-party build from blocking the whole matrix.
 tokbench-hf-tokenizers = { path = "../engines/hf-tokenizers", optional = true }
 tokbench-pipeline = { path = "../engines/pipeline", optional = true }
+tokbench-kitoken = { path = "../engines/kitoken", optional = true }
 tokbench-fastokens = { path = "../engines/fastokens", optional = true }
 tokbench-tokie = { path = "../engines/tokie", optional = true }
 tokbench-tiktoken = { path = "../engines/tiktoken", optional = true }
@@ -45,6 +46,7 @@ default = ["hf-tokenizers"]
 
 hf-tokenizers = ["dep:tokbench-hf-tokenizers"]
 pipeline = ["dep:tokbench-pipeline"]
+kitoken = ["dep:tokbench-kitoken"]
 fastokens = ["dep:tokbench-fastokens"]
 tokie = ["dep:tokbench-tokie"]
 tiktoken = ["dep:tokbench-tiktoken"]
@@ -62,6 +64,7 @@ executorch = ["dep:tokbench-executorch"]
 rust-engines = [
     "hf-tokenizers",
     "pipeline",
+    "kitoken",
     "fastokens",
     "tokie",
     "tiktoken",

@@ -68,6 +68,48 @@ def find_bytelevel(node) -> bool:
     return False
 
 
+def find_split_regexes(node, out: list[str]) -> None:
+    """Collect every explicit `Split` regex in the pre-tokenizer tree."""
+    if isinstance(node, dict):
+        if node.get("type") == "Split":
+            pat = node.get("pattern")
+            if isinstance(pat, dict) and "Regex" in pat:
+                out.append(pat["Regex"])
+        for v in node.values():
+            find_split_regexes(v, out)
+    elif isinstance(node, list):
+        for v in node:
+            find_split_regexes(v, out)
+
+
+def split_pattern(cfg) -> tuple[str | None, str]:
+    """The single regex tiktoken should split on, or `None` with a reason.
+
+    tiktoken takes exactly ONE pattern and applies it with a global find. A
+    HuggingFace `Sequence` of several `Split` stages applies them in order,
+    which is not equivalent to alternating them -- so when a model has more
+    than one regex (deepseek-v4 has three), there is no honest single-pattern
+    translation and this returns `None`. Writing a joined pattern anyway would
+    produce different token ids while still looking like a successful
+    conversion, which is the failure mode this whole repo exists to prevent.
+    """
+    regexes: list[str] = []
+    find_split_regexes(cfg.get("pre_tokenizer"), regexes)
+    # De-duplicate while preserving order; some configs repeat a stage.
+    seen = set()
+    regexes = [r for r in regexes if not (r in seen or seen.add(r))]
+
+    if len(regexes) == 1:
+        return regexes[0], "model's own Split regex"
+    if not regexes:
+        if find_bytelevel(cfg):
+            # A bare ByteLevel pre-tokenizer does not store a pattern; the
+            # GPT-2 pattern is what it implies.
+            return GPT2_PATTERN, "implied GPT-2 ByteLevel pattern"
+        return None, "no Split regex and no ByteLevel pre-tokenizer"
+    return None, f"{len(regexes)} sequential Split regexes — no single-pattern equivalent"
+
+
 def convert(model_dir: Path) -> None:
     tj = model_dir / "tokenizer.json"
     if not tj.exists():
@@ -90,6 +132,13 @@ def convert(model_dir: Path) -> None:
         print(f"  {model_dir.name}: BPE but not ByteLevel — ranks would be wrong, skipped")
         return
 
+    pattern, why = split_pattern(cfg)
+    if pattern is None:
+        print(f"  {model_dir.name}: no tiktoken artifacts — {why}")
+        for stale in ("ranks.tiktoken", "pattern.txt"):
+            (model_dir / stale).unlink(missing_ok=True)
+        return
+
     # ranks.tiktoken: "<base64 of raw token bytes> <rank>" per line.
     lines = []
     bad = 0
@@ -104,9 +153,9 @@ def convert(model_dir: Path) -> None:
             continue
         lines.append(f"{base64.b64encode(raw).decode()} {rank}")
     (model_dir / "ranks.tiktoken").write_text("\n".join(lines) + "\n")
-    (model_dir / "pattern.txt").write_text(GPT2_PATTERN + "\n")
+    (model_dir / "pattern.txt").write_text(pattern + "\n")
     note = f" ({bad} non-byte-level tokens excluded)" if bad else ""
-    print(f"  {model_dir.name}: ranks.tiktoken {len(lines)} entries{note}, pattern.txt")
+    print(f"  {model_dir.name}: ranks.tiktoken {len(lines)} entries{note}, pattern.txt [{why}]")
 
     enc = KNOWN_OPENAI.get(len(vocab))
     if enc:

@@ -79,6 +79,17 @@ struct Args {
     #[arg(long)]
     no_memory: bool,
 
+    /// Run the multi-thread scaling sweep on these corpora (repeatable).
+    ///
+    /// Scoped to named corpora rather than run everywhere because the sweep
+    /// builds and warms one engine per thread at every thread count — on an
+    /// 8-core box that is ~25 extra full-corpus encodes per engine per cell,
+    /// which would dominate the wall time of a full matrix. Scaling behaviour
+    /// barely varies by language, so one or two representative corpora give
+    /// the same answer for a fraction of the cost.
+    #[arg(long = "scaling")]
+    scaling: Vec<String>,
+
     /// Per-engine stripped binary deltas, as written by `scripts/binsize.sh`.
     /// Merged into the report when present.
     #[arg(long, default_value = "binary_sizes.json")]
@@ -176,6 +187,20 @@ struct EngineResult {
     /// can compile to a lot, and vice versa. From `scripts/binsize.sh`.
     #[serde(skip_serializing_if = "Option::is_none")]
     binary_delta_kb: Option<f64>,
+
+    /// Multi-thread scaling curve, when the sweep ran for this cell.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    scaling: Option<Vec<ScalePoint>>,
+}
+
+/// One point on an engine's scaling curve.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+struct ScalePoint {
+    threads: usize,
+    mbps: f64,
+    /// Percentage of perfect linear scaling from the 1-thread number. 100% =
+    /// each added core added a full core's worth of throughput.
+    efficiency_pct: f64,
 }
 
 /// One entry of `package_sizes.json`.
@@ -294,6 +319,13 @@ fn main() -> Result<()> {
 
     let natives = registry::native();
     let scripted = registry::scripted();
+    let thread_sweep = tokbench_core::thread_counts();
+    if !args.scaling.is_empty() {
+        eprintln!(
+            "scaling sweep on {:?} at thread counts {:?}",
+            args.scaling, thread_sweep
+        );
+    }
     let want = |n: &str| args.engine.is_empty() || args.engine.iter().any(|e| e == n);
 
     let cells = models.len() * corpora.len();
@@ -340,7 +372,13 @@ fn main() -> Result<()> {
                     continue;
                 }
                 let t0 = Instant::now();
-                let built = ctor(&model);
+                // Third-party code, adversarial inputs. A panic here is a
+                // finding about that engine, not a reason to lose the run.
+                let built =
+                    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| ctor(&model))) {
+                        Ok(r) => r,
+                        Err(_) => Err(tokbench_core::Unsupported("panicked while loading".into())),
+                    };
                 let load_ms = t0.elapsed().as_secs_f64() * 1e3;
 
                 match built {
@@ -367,7 +405,27 @@ fn main() -> Result<()> {
                     }
                     Ok(mut engine) => {
                         let info = engine.info();
-                        let m = measure(engine.as_mut(), &chunks, args.reps, !args.no_warmup);
+                        let measured =
+                            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                measure(engine.as_mut(), &chunks, args.reps, !args.no_warmup)
+                            }));
+                        let Ok(m) = measured else {
+                            eprintln!(
+                                "  {model_name}/{corpus_name} {name}: PANICKED while encoding"
+                            );
+                            results.push(EngineResult {
+                                tokenizer_name: name.to_string(),
+                                engine_version: info.version.into(),
+                                engine_lang: info.lang.into(),
+                                engine_class: info.class.as_str().into(),
+                                load_ms,
+                                unsupported: Some(
+                                    "panicked while encoding this corpus".to_string(),
+                                ),
+                                ..Default::default()
+                            });
+                            continue;
+                        };
 
                         // Stage breakdown on a separate, untimed pass so the
                         // extra clock reads never inflate the headline.
@@ -388,6 +446,43 @@ fn main() -> Result<()> {
                             m.ns_per_byte,
                             m.tokens
                         );
+
+                        // Multi-thread sweep, only on the corpora asked for.
+                        // Runs after the single-thread timing so it can never
+                        // perturb the headline number.
+                        let scaling = if args.scaling.iter().any(|c| *c == corpus_name) {
+                            let make = || ctor(&model).ok();
+                            let pts =
+                                // 100 ms per timed pass: long enough that thread
+                                // start-up is noise even for the fastest
+                                // engines, which would otherwise finish a small
+                                // corpus before the threads were even up.
+                                tokbench_core::measure_scaling(
+                                    &make,
+                                    &chunks,
+                                    &thread_sweep,
+                                    3,
+                                    0.100,
+                                );
+                            if !pts.is_empty() {
+                                let best = pts.last().unwrap();
+                                eprintln!(
+                                    "        threads {} -> {:.1} MB/s ({:.0}% of linear)",
+                                    best.threads, best.mbps, best.efficiency_pct
+                                );
+                            }
+                            Some(
+                                pts.into_iter()
+                                    .map(|p| ScalePoint {
+                                        threads: p.threads,
+                                        mbps: p.mbps,
+                                        efficiency_pct: p.efficiency_pct,
+                                    })
+                                    .collect(),
+                            )
+                        } else {
+                            None
+                        };
 
                         results.push(EngineResult {
                             tokenizer_name: name.to_string(),
@@ -410,6 +505,7 @@ fn main() -> Result<()> {
                             ids_hash: format!("{:016x}", m.ids_hash),
                             verified: None,
                             unsupported: None,
+                            scaling,
                             ..Default::default()
                         });
                     }

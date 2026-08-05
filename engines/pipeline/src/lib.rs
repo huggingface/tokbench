@@ -1,50 +1,86 @@
-//! The HuggingFace **target encode path** — `tk-encode` from
+//! The HuggingFace **target encode path** — `PipelineTokenizer` from
 //! [tokenizers#2279](https://github.com/huggingface/tokenizers/pull/2279)
 //! ("bitsplit + batched model + fused cache probe").
 //!
-//! This is the interesting row in the table: it is the same project as the
-//! reference engine, reading the same `tokenizer.json`, so the difference
-//! between `hf-tokenizers` and `pipeline` is purely the new encode path rather
-//! than a different vocabulary, a different pre-tokenizer, or a different
-//! notion of what a token is. Every other engine in this repository is a
-//! comparison across projects; this one is a controlled before/after.
+//! This is the interesting row in the table: same project as the reference
+//! engine, same `tokenizer.json`, so the difference between `hf-tokenizers`
+//! and `pipeline` is the encode path itself rather than a different
+//! vocabulary or a different idea of what a token is. Every other pairing here
+//! compares across projects; this one is a controlled before/after.
 //!
-//! Which makes verification matter more here, not less. A rewrite of the merge
-//! loop and pre-tokenizer is exactly the kind of change that can be very fast
-//! and subtly wrong on some script, so the `verified` flag against
-//! `tokenizers 0.23.1` is the whole point — a mismatch on any corpus is a bug
-//! report, not a benchmark result.
+//! ## Getting this wrong is easy — a note for the next person
 //!
-//! ## Why `encode_fast`
+//! `tk_encode::Tokenizer::from_file(..).encode_fast(..)` compiles, runs, and
+//! returns correct ids. It is also the **legacy** path that this PR carries
+//! alongside the new one, and it benchmarks ~100x slower than the work the PR
+//! is actually about. The target path is a different type entirely:
 //!
-//! `encode_fast` is the offset-free path. The reference engine is called
-//! through `encode`, which also computes byte offsets, word ids and an
-//! attention mask. Timing this side's *offset-computing* path against
-//! competitors that only produce ids would be the wrong comparison, and timing
-//! the reference's `encode_fast` while calling this one's `encode` would be the
-//! wrong comparison in the other direction.
+//! ```ignore
+//! let legacy = tk_encode::Tokenizer::from_file(path)?;      // parse the config
+//! let pipe = PipelineTokenizer::try_from(&legacy)?;          // build the fast path
+//! pipe.encode_generic::<{ PipelineTokenizer::STAGE_POSTPROCESS }>(
+//!     text, add_special_tokens, &mut pre_tokens, &mut scratch, &mut out)?;
+//! ```
 //!
-//! Both are declared honestly instead of quietly equalised: the reference
-//! discloses `also_computes: "byte offsets, word ids, attention mask"` and this
-//! engine discloses nothing extra, so the report shows a reader that part of
-//! any gap between the two is offset bookkeeping rather than raw encode speed.
-//! The ids are identical either way, which is what `verified` checks.
+//! `STAGE_POSTPROCESS` is the full pipeline; the lower `STAGE_*` constants are
+//! the ablation ladder (frame / normalize / split / model) and must NOT be used
+//! for a headline number, since they skip real work.
+//!
+//! ## Why the buffers live in the adapter
+//!
+//! `encode_generic` writes into caller-owned `pre_tokens` and `scratch`. Those
+//! are allocated once at build time and reused, which is the configuration the
+//! PR's own `ab_giga` harness measures and the one a server would run. Creating
+//! them per call would charge the engine an allocation and a first-touch of the
+//! whole token array on every encode — a cost that scales with token count, so
+//! it would quietly penalise token-dense corpora (Chinese emits ~3.5x the
+//! tokens of English for the same bytes) rather than measuring the encoder.
+//!
+//! This is the same courtesy every other engine gets: `tokbench_core::measure`
+//! hands each of them a reused `out` buffer.
+//!
+//! ## The one cost this adapter adds
+//!
+//! `encode_generic` fills a `Vec<PipelineToken>` (a one-field `{ id: u32 }`
+//! struct), while the harness compares `Vec<u32>`. The `.map(|t| t.id)` copy
+//! below is therefore adapter overhead the PR's own bench does not pay. It is
+//! left in and timed rather than hidden with a transmute: it is small, it is
+//! honest, and a caller wanting ids out of this API pays it too.
 
-use tokbench_core::{Build, Class, Engine, Ids, Info, Model, Unsupported};
+use tk_encode::pipeline::{Model, PipelineModelScratch, PipelineToken, PipelineTokenizer, Span};
+use tk_encode::Tokenizer;
+use tokbench_core::{Build, Class, Engine, Ids, Info, Model as BenchModel, Unsupported};
 
 pub struct Adapter {
-    tok: tk_encode::Tokenizer,
+    pipe: PipelineTokenizer,
+    /// Reused across calls; see the module docs.
+    pre_tokens: Vec<Span>,
+    scratch: PipelineModelScratch,
+    toks: Vec<PipelineToken>,
 }
 
 impl Build for Adapter {
-    fn build(model: &Model) -> Result<Box<dyn Engine>, Unsupported> {
+    fn build(model: &BenchModel) -> Result<Box<dyn Engine>, Unsupported> {
         let path = model.tokenizer_json();
         if !path.exists() {
             return Err(Unsupported("no tokenizer.json".into()));
         }
-        let tok = tk_encode::Tokenizer::from_file(&path)
+        // The legacy tokenizer is only the config parser here — it is dropped
+        // once the pipeline is built, and is never on the measured path.
+        let legacy = Tokenizer::from_file(&path)
             .map_err(|e| Unsupported(format!("tk-encode cannot load this config: {e}")))?;
-        Ok(Box::new(Adapter { tok }))
+        let pipe = PipelineTokenizer::try_from(&legacy).map_err(|e| {
+            Unsupported(format!(
+                "PipelineTokenizer does not support this config yet: {e}"
+            ))
+        })?;
+        let scratch = pipe.get_model().init_scratch();
+        Ok(Box::new(Adapter {
+            pipe,
+            pre_tokens: Vec::new(),
+            scratch,
+            toks: Vec::new(),
+        }))
     }
 }
 
@@ -52,7 +88,7 @@ impl Engine for Adapter {
     fn info(&self) -> Info {
         Info {
             name: "pipeline",
-            // Not a release: the branch head. See the pinning note in Cargo.toml.
+            // Not a release: the branch head. Pin a rev before quoting this.
             version: "tk-encode 0.23.2-dev.0 (PR #2279, poc/target-encode)",
             lang: "rust",
             class: Class::Native,
@@ -63,8 +99,20 @@ impl Engine for Adapter {
     }
 
     fn encode(&mut self, text: &str, out: &mut Ids) {
-        if let Ok(enc) = self.tok.encode_fast(text, false) {
-            out.extend_from_slice(enc.get_ids());
+        self.toks.clear();
+        let r = self
+            .pipe
+            .encode_generic::<{ PipelineTokenizer::STAGE_POSTPROCESS }>(
+                text,
+                false,
+                &mut self.pre_tokens,
+                &mut self.scratch,
+                &mut self.toks,
+            );
+        // On failure `out` stays short, which changes the id hash, so the
+        // verification gate reports it instead of it passing as a fast run.
+        if r.is_ok() {
+            out.extend(self.toks.iter().map(|t| t.id));
         }
     }
 }

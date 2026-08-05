@@ -9,6 +9,7 @@ members = [
     "binsize",
     "engines/hf-tokenizers",
     "engines/pipeline",
+    "engines/kitoken",
     "engines/fastokens",
     "engines/tokie",
     "engines/tiktoken",
@@ -31,8 +32,23 @@ members = [
 opt-level = 3
 lto = "fat"
 codegen-units = 1
-panic = "abort"
 debug = 1
+# Unwinding, NOT abort. The driver runs third-party code over adversarial
+# inputs, and some of it panics (tokie 0.1.4 indexes out of bounds on a
+# truncated vocabulary). With `panic = "abort"` one bad engine takes the whole
+# matrix down and 79 good cells are lost; with unwind the driver catches it,
+# records "panicked" for that cell, and carries on. A benchmark harness has to
+# survive the thing it is benchmarking.
+
+# The size probe ships the flags a real minimal build would use — matching
+# tokenizers#2293's methodology (opt-level=z, panic=abort, cgu=1, lto=fat,
+# stripped) so the numbers are comparable with the ones quoted there.
+[profile.binsize]
+inherits = "release"
+opt-level = "z"
+panic = "abort"
+strip = true
+debug = 0
 
 [workspace.package]
 edition = "2021"

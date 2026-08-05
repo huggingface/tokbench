@@ -343,6 +343,221 @@ pub fn read_corpus(path: &Path) -> Option<String> {
     std::fs::read_to_string(path).ok()
 }
 
+// ---------------------------------------------------------------------------
+// Multi-thread scaling
+// ---------------------------------------------------------------------------
+
+/// One point on the scaling curve.
+#[derive(Clone, Copy, Debug)]
+pub struct ThreadPoint {
+    pub threads: usize,
+    pub mbps: f64,
+    /// Throughput as a percentage of perfect linear scaling from the
+    /// single-thread number: `mbps(n) / (n * mbps(1)) * 100`.
+    ///
+    /// 100% means adding a core added a core's worth of throughput. This is
+    /// the number that actually matters for a serving deployment, and it is
+    /// where tokenizers differ most: an engine holding a shared cache behind a
+    /// lock can post an excellent single-thread figure and then scale at 15%,
+    /// while a slower engine with thread-local state scales at 95% and wins on
+    /// any real machine.
+    pub efficiency_pct: f64,
+}
+
+/// `1, 2, 4, 8, ...` — powers of two up to the count of **performance** cores.
+///
+/// Two deliberate exclusions:
+///
+/// * **Efficiency cores.** On a hybrid CPU (Apple silicon, Intel P/E),
+///   `available_parallelism` counts E-cores, which run the same code several
+///   times slower. Scheduling onto them drags the aggregate down and shows up
+///   as an efficiency collapse that says nothing about the tokenizer. On a
+///   10P+4E machine the 14-thread point is not a scaling measurement, it is a
+///   measurement of the E-cores.
+/// * **The odd top value.** A trailing non-power-of-two point (say 10) makes
+///   the curve's last segment a different width from the others, which reads
+///   as a slope change on a log axis when nothing changed.
+pub fn thread_counts() -> Vec<usize> {
+    let max = perf_cores();
+    let mut v = Vec::new();
+    let mut n = 1;
+    while n <= max {
+        v.push(n);
+        n *= 2;
+    }
+    if v.is_empty() {
+        v.push(1);
+    }
+    v
+}
+
+/// Performance-core count, falling back to total parallelism where the
+/// distinction is unavailable.
+fn perf_cores() -> usize {
+    #[cfg(target_os = "macos")]
+    {
+        // `hw.perflevel0` is the performance cluster; absent on non-hybrid Macs.
+        if let Ok(out) = std::process::Command::new("sysctl")
+            .args(["-n", "hw.perflevel0.logicalcpu"])
+            .output()
+        {
+            if let Ok(n) = String::from_utf8_lossy(&out.stdout).trim().parse::<usize>() {
+                if n > 0 {
+                    return n;
+                }
+            }
+        }
+    }
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+}
+
+/// Measure throughput at each thread count and derive scaling efficiency.
+///
+/// # How the work is parallelised, and why this way
+///
+/// Each thread gets **its own engine instance** (built by `make`, outside the
+/// timer) and pulls documents off a shared atomic cursor. Two deliberate
+/// choices:
+///
+/// * **Per-thread engines, not one shared engine.** Most of these libraries
+///   are not `Sync`, and those that are often hide a mutex around a shared
+///   cache. Giving every thread its own instance measures the best case the
+///   library can offer, so a poor scaling number is a real property of the
+///   engine rather than an artefact of how the harness shared it.
+/// * **Work stealing, not a static split.** Documents differ in cost by more
+///   than 10x across scripts. A contiguous split would leave threads idle at
+///   the end and report that as poor scaling; a shared cursor keeps every
+///   thread busy until the corpus is done, so what is measured is the engine,
+///   not the partitioning.
+///
+/// Warm-up runs per thread over the whole corpus, matching what
+/// [`measure`] does for the single-thread case, so the 1-thread point of this
+/// curve is directly comparable with the headline number.
+///
+/// Engines that parallelise *internally* will show >100% efficiency here,
+/// because they were already using more than one core at "1 thread". That is
+/// why [`Info::internally_parallel`] exists and why the report flags it.
+///
+/// `target_secs` is how long one timed pass should last; the corpus is walked
+/// as many times as needed to reach it (see below). Pass `0.0` to walk it
+/// exactly once, which is only appropriate for tests.
+pub fn measure_scaling(
+    make: &(dyn Fn() -> Option<Box<dyn Engine>> + Sync),
+    chunks: &[String],
+    counts: &[usize],
+    reps: usize,
+    target_secs: f64,
+) -> Vec<ThreadPoint> {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let bytes: usize = chunks.iter().map(|c| c.len()).sum();
+    let mut out: Vec<ThreadPoint> = Vec::new();
+    let mut base = f64::NAN;
+
+    // How many times to walk the corpus inside ONE timed pass.
+    //
+    // Without this the sweep measures thread spawning, not tokenizing. A 200 kB
+    // corpus is ~20 documents; at 14 threads that is 1.4 documents each, and a
+    // fast engine finishes the whole corpus in a few hundred microseconds —
+    // less than it costs to start the threads. The result is an efficiency
+    // figure that collapses toward zero for precisely the fastest engines,
+    // which looks like a damning scaling result and is pure artefact.
+    //
+    // So: time one warm single-thread pass, then repeat the corpus enough times
+    // that the timed region is ~100 ms. Thread start-up becomes noise, and every
+    // thread has real work queued. The corpus is walked in order and each
+    // document is encoded the same number of times by construction, so the
+    // measured throughput still refers to distinct documents rather than one
+    // document replayed out of cache.
+    let repeat = if target_secs <= 0.0 {
+        1
+    } else {
+        let mut probe = match make() {
+            Some(e) => e,
+            None => return out,
+        };
+        let mut buf: Ids = Vec::new();
+        for c in chunks {
+            buf.clear();
+            probe.encode(c, &mut buf); // warm
+        }
+        let t = Instant::now();
+        for c in chunks {
+            buf.clear();
+            probe.encode(c, &mut buf);
+        }
+        let one = t.elapsed().as_secs_f64();
+        if one > 0.0 {
+            ((target_secs / one).ceil() as usize).clamp(1, 10_000)
+        } else {
+            1
+        }
+    };
+    let total_units = chunks.len() * repeat;
+    let total_bytes = bytes * repeat;
+
+    for &n in counts {
+        // Build and warm every engine before the clock starts.
+        let mut engines: Vec<Box<dyn Engine>> = Vec::with_capacity(n);
+        for _ in 0..n {
+            match make() {
+                Some(e) => engines.push(e),
+                None => return out,
+            }
+        }
+        for e in engines.iter_mut() {
+            let mut buf: Ids = Vec::new();
+            for c in chunks {
+                buf.clear();
+                e.encode(c, &mut buf);
+            }
+        }
+
+        let mut samples = Vec::with_capacity(reps);
+        for _ in 0..reps {
+            let cursor = AtomicUsize::new(0);
+            let t0 = Instant::now();
+            std::thread::scope(|s| {
+                for e in engines.iter_mut() {
+                    let cursor = &cursor;
+                    s.spawn(move || {
+                        let mut buf: Ids = Vec::with_capacity(4096);
+                        loop {
+                            let i = cursor.fetch_add(1, Ordering::Relaxed);
+                            if i >= total_units {
+                                break;
+                            }
+                            buf.clear();
+                            e.encode(&chunks[i % chunks.len()], &mut buf);
+                            std::hint::black_box(&buf);
+                        }
+                    });
+                }
+            });
+            samples.push(t0.elapsed().as_secs_f64());
+        }
+
+        let secs = median(samples);
+        let mbps = (total_bytes as f64 / (1024.0 * 1024.0)) / secs;
+        if n == counts[0] {
+            base = mbps;
+        }
+        let ideal = base * n as f64 / counts[0] as f64;
+        out.push(ThreadPoint {
+            threads: n,
+            mbps,
+            efficiency_pct: if ideal > 0.0 {
+                mbps / ideal * 100.0
+            } else {
+                0.0
+            },
+        });
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -388,6 +603,78 @@ mod tests {
         let again = measure(&mut Bytes, &chunks, 1, true);
         assert_eq!(m.ids_hash, again.ids_hash);
         assert_ne!(ids_hash(&[1, 2, 3]), ids_hash(&[3, 2, 1]));
+    }
+
+    /// The work-stealing loop must hand every document to exactly one thread.
+    /// If it dropped documents the corpus would shrink and throughput would
+    /// look better with more threads; if it double-counted them, worse. Either
+    /// way the scaling curve would be fiction, so this is checked directly.
+    #[test]
+    fn scaling_covers_every_document_exactly_once() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        static SEEN: AtomicUsize = AtomicUsize::new(0);
+
+        struct Counting;
+        impl Engine for Counting {
+            fn info(&self) -> Info {
+                Info {
+                    name: "counting",
+                    version: "0",
+                    lang: "rust",
+                    class: Class::Native,
+                    url: "",
+                    also_computes: "",
+                    internally_parallel: false,
+                }
+            }
+            fn encode(&mut self, text: &str, out: &mut Ids) {
+                SEEN.fetch_add(text.len(), Ordering::Relaxed);
+                out.push(text.len() as u32);
+            }
+        }
+
+        let text = "lorem ipsum dolor sit amet ".repeat(400);
+        let chunks = chunk(&text, 512, 100);
+        let total: usize = chunks.iter().map(|c| c.len()).sum();
+        let counts = vec![1usize, 2, 4];
+        let reps = 1;
+
+        let made = Arc::new(AtomicUsize::new(0));
+        let m = made.clone();
+        let make = move || -> Option<Box<dyn Engine>> {
+            m.fetch_add(1, Ordering::Relaxed);
+            Some(Box::new(Counting))
+        };
+
+        SEEN.store(0, Ordering::Relaxed);
+        // target_secs = 0 → walk the corpus exactly once per pass, so the
+        // expected byte count below is exact.
+        let pts = measure_scaling(&make, &chunks, &counts, reps, 0.0);
+        assert_eq!(pts.len(), counts.len());
+
+        // Warm-up encodes the whole corpus once per engine, and each timed rep
+        // encodes it once in total across all threads. For counts [1,2,4]:
+        // warm-up = (1+2+4) corpora, timed = 3 corpora (one per count).
+        let engines: usize = counts.iter().sum();
+        let expected = total * engines + total * counts.len() * reps;
+        assert_eq!(
+            SEEN.load(Ordering::Relaxed),
+            expected,
+            "every document must be encoded exactly once per timed pass"
+        );
+        assert_eq!(
+            made.load(Ordering::Relaxed),
+            engines,
+            "one engine per thread"
+        );
+
+        // The single-thread point is the baseline, so it is 100% by definition.
+        assert!((pts[0].efficiency_pct - 100.0).abs() < 1e-6);
+        for p in &pts {
+            assert!(p.mbps > 0.0 && p.mbps.is_finite());
+        }
     }
 
     /// Chunk boundaries must never split a multi-byte character, or engines

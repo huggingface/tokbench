@@ -44,25 +44,59 @@ The contract is written out in full at the top of [`core/src/lib.rs`](core/src/l
 
 ## Results are only as honest as their caveats
 
-A real run on `gpt2` / English prose, 1.0 MB chunked, single thread, median of
-5, warm cache, `add_special_tokens = false`, Apple M-series:
+**7 models × 10 corpora = 70 cells**, single thread, median of 5, warm cache,
+`add_special_tokens = false`, Apple M-series. 63 seconds for the whole matrix.
 
-| engine | MB/s | ns/B | vs ref | ids | RSS | package |
-|---|---:|---:|---:|:--:|---:|---:|
-| tokie 0.1.4 | 423.1 | 2.25 | 57.4× | match | 43.2 MB | 181 kB |
-| tiktoken-rs 0.12.0 | 22.3 | 42.8 | 3.0× | match | 12.7 MB | 3699 kB |
-| pipeline ([#2279](https://github.com/huggingface/tokenizers/pull/2279)) | 10.7 | 89.3 | 1.4× | match | 33.2 MB | — |
-| tokenizers 0.23.1 (reference) | 7.4 | 129.4 | 1.0× | — | 35.6 MB | 192 kB |
+| engine | cells run | ids match | ids differ | median MB/s | max MB/s |
+|---|---:|---:|---:|---:|---:|
+| pipeline ([#2279](https://github.com/huggingface/tokenizers/pull/2279)) | 70 | 62 | **8** | 489.0 | 1519.8 |
+| tokie 0.1.4 | 70 | 52 | **18** | 70.1 | 419.7 |
+| fastokens 0.3.1 | 40 | 40 | 0 | 68.2 | 104.0 |
+| tiktoken-rs 0.12.0 | 30 | 30 | 0 | 31.1 | 43.8 |
+| mistral-common 1.10.0 (Python) | 10 | 10 | 0 | 13.4 | 16.0 |
+| tokenizers 0.23.1 (reference) | 70 | — | — | 11.7 | 36.3 |
 
-All four emit **245,277 tokens with the identical id hash** `47cdd1399a60de5a`,
-which is the only reason the ranking means anything. Note the reference also
-computes byte offsets, word ids and an attention mask on the same pass; the
-others do not. That is a real part of the gap, and it is disclosed rather than
-subtracted.
+Speedup over the released crate, **computed only over cells where the ids
+match** — a mismatched cell contributes nothing, because it is not the same
+computation:
 
-This is one model on one corpus on one machine, and it is not a league table:
-tokie's 57× is on Latin prose with a warm pretoken cache, which is the regime
-that suits it best. Run the full matrix before drawing conclusions.
+| engine | median speedup | verified cells |
+|---|---:|---:|
+| pipeline | **46.2×** | 62 |
+| fastokens | 5.4× | 40 |
+| tokie | 3.6× | 52 |
+| tiktoken | 2.4× | 30 |
+| mistral-common | 1.1× | 10 |
+
+`pipeline`, per model (verified cells only):
+
+| model | median | best corpus |
+|---|---:|---:|
+| llama-3 | 73.6× | 125.0× |
+| gpt2 | 65.0× | 118.9× |
+| deepseek-v4 | 48.0× | 63.9× |
+| mistral-nemo | 42.9× | 60.0× |
+| bert-wiki (WordPiece) | 12.1× | 151.6× |
+| llama-2 | 9.8× | 18.8× |
+| albert (Unigram) | 3.0× | 3.5× |
+
+### What the mismatches mean
+
+- **`pipeline` differs from the reference on all 8 albert (Unigram) cells.**
+  Byte-level BPE, WordPiece and llama-2 all agree. That is a concrete,
+  reproducible finding for #2279, not a benchmarking artefact.
+- **`tokie` differs on every bert-wiki (WordPiece) and albert (Unigram) cell**
+  — 18 in total — while matching on all byte-level BPE. It also **panics**
+  (index out of bounds, `encoder/simple.rs:169`) on a truncated vocabulary.
+  The driver catches that and records the cell rather than losing the run.
+- `fastokens` cannot load a `tokenizer.json` that omits `model.type`, which the
+  old gpt2 fixture does — hence 40 cells rather than 70, all of them matching.
+
+Caveats that belong with these numbers: the reference also computes byte
+offsets, word ids and an attention mask on the same pass, which the others do
+not, so part of every gap is offset bookkeeping. Warm cache flatters engines
+built around pretoken caches — which is most of the fast ones. And this is one
+machine, single-threaded.
 
 Phase breakdown for the reference on that run:
 
@@ -102,6 +136,7 @@ measurement.
 |---|---|---|---|
 | [hf-tokenizers](engines/hf-tokenizers) | Rust | native | **wired** — reference + oracle, 4-phase instrumented |
 | [pipeline](engines/pipeline) | Rust | native | **wired** — the target encode path, [tokenizers#2279](https://github.com/huggingface/tokenizers/pull/2279) |
+| [kitoken](engines/kitoken) | Rust | native | **wired** — BPE + Unigram + WordPiece from one crate |
 | [tokie](engines/tokie) | Rust | native | **wired, verified** |
 | [tiktoken](engines/tiktoken) | Rust | native | **wired, verified** (needs derived `ranks.tiktoken`) |
 | [fastokens](engines/fastokens) | Rust | native | **wired** — rejects tokenizer.json without `model.type` |
@@ -152,6 +187,23 @@ Two more notes worth reading before trusting any row:
 - **The `blingfire` crate cannot produce token ids.** It exposes `text_to_words`
   and `text_to_sentences`, which return strings. Benchmarking those against
   subword tokenizers would be the most misleading thing this repo could print.
+
+## The dashboard
+
+`dashboard.html` is a single file — drop `tokenizer_bench_results.json` on it.
+The matrix is engine × model × corpus, which does not fit in a bar chart, so
+the three main views are heatmaps:
+
+- **engine × model** — median across every language; click a cell to focus it.
+- **engine × corpus** for one model — where script coverage shows. CJK, Thai
+  and Arabic behave nothing like Latin prose.
+- **model × corpus** for one engine — one engine's whole surface at once.
+
+Colour is **log-scaled**, because throughput here spans 1.7 → 1520 MB/s and a
+linear ramp collapses everything except the winner into one dark cell. Cells
+whose ids disagree with the reference are drawn with a red border and an ✗, and
+"Hide unverified" removes them; they are never silently coloured as if they
+were comparable results.
 
 ## Interpreted engines
 
