@@ -164,6 +164,29 @@ blingfire is excluded here. It posts 93% efficiency on gpt2/english, but 0/10
 of its cells verify — it emits no whitespace tokens at all, so its curve
 describes a different computation.
 
+**English is not representative, so here is Chinese.** The English-only sweep
+above flatters gigatoken, because English is where it wins single-thread. On
+Chinese the single-thread ordering reverses, and threading does not rescue it —
+both scale at ~94%, so the gap simply persists:
+
+| engine | 1t | 2t | 4t | 8t | 8t eff | (gpt2 / chinese) |
+|---|---:|---:|---:|---:|---:|---|
+| pipeline | 909 | 1730 | 3471 | **6826** | 94% | |
+| gigatoken | 485 | 943 | 1855 | 3657 | 94% | **1.87× slower** |
+| iree | 74 | 146 | 284 | 560 | 95% | |
+| tokie | 71 | 138 | 279 | 516 | 90% | |
+| kitoken | 41 | 79 | 152 | 286 | 87% | |
+| tiktoken | 35 | 60 | 120 | 208 | 74% | |
+| tokenizers 0.23.1 | 17 | 30 | 52 | 74 | **55%** | |
+
+llama-3/chinese is the same story: pipeline 6966 against gigatoken 3934 at eight
+threads, 1.77×. All cells id-verified.
+
+The lesson generalises past these two engines: **scaling efficiency is roughly
+constant per engine across scripts, but single-thread throughput is not**, so a
+multi-thread ranking measured on one language inherits that language's bias
+whole. Sweep at least one Latin and one CJK corpus before quoting an MT number.
+
 ### Two hazards this benchmark had to solve
 
 **Co-linking engines can silently corrupt an unrelated one.** executorch
