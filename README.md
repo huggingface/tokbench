@@ -44,72 +44,91 @@ The contract is written out in full at the top of [`core/src/lib.rs`](core/src/l
 
 ## Results are only as honest as their caveats
 
-**7 models × 10 corpora = 70 cells**, single thread, median of 5, warm cache,
-`add_special_tokens = false`, Apple M-series. 63 seconds for the whole matrix.
+**7 models × 10 languages = 70 cells**, every engine, single thread, median of 5,
+warm cache, `add_special_tokens = false`, Apple M-series (10 P-cores).
 
-| engine | cells run | ids match | ids differ | median MB/s | max MB/s |
+| engine | cells | ids match | ids differ | median MB/s | × ref | RSS | package |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| gigatoken | 50 | 50 | 0 | **605.6** | 55.3× | 89 MB | 5230 kB |
+| pipeline ([#2279](https://github.com/huggingface/tokenizers/pull/2279)) | 70 | 62 | 8 | **501.8** | 45.0× | 63 MB | — |
+| wordchipper | 30 | 29 | 1 | 78.6 | 5.8× | 105 MB | 259 kB |
+| tokie | 70 | 52 | 18 | 70.0 | 3.6× | 44 MB | 181 kB |
+| fastokens | 40 | 40 | 0 | 67.9 | 5.3× | 153 MB | 690 kB |
+| ai-tokenizer (JS) | 30 | 30 | 0 | 59.5 | 4.6× | — | 31133 kB |
+| iree | 70 | 37 | 33 | 56.9 | 6.7× | 15 MB | — |
+| tiktoken | 30 | 30 | 0 | 31.9 | 2.5× | 34 MB | 3699 kB |
+| kitoken | 70 | **70** | 0 | 29.6 | 2.4× | 23 MB | 63 kB |
+| mistral-common (Py) | 10 | 10 | 0 | 13.6 | 1.1× | — | 6400 kB |
+| tokenizers 0.23.1 (reference) | 70 | — | — | 12.2 | 1.0× | 40 MB | 192 kB |
+| blingfire | 10 | 0 | **10** | 7.8 | — | 2 MB | 3 kB |
+| llamacpp | 60 | 47 | 13 | 7.0 | 0.5× | 31 MB | 215 kB |
+| executorch | 40 | 40 | 0 | 3.9 | 0.3× | 47 MB | 1532 kB |
+| minbpe (Py) | 10 | 10 | 0 | 1.0 | 0.1× | — | — |
+
+`× ref` is the median over **verified cells only** — a mismatched cell contributes
+nothing, because it is not the same computation.
+
+**kitoken is the only engine besides the reference that runs all 70 cells with
+correct ids**, covering BPE, Unigram and WordPiece, at 2.4× the reference, the
+smallest package (63 kB) and 23 MB resident. Every faster engine buys its speed
+by supporting less.
+
+### pipeline vs gigatoken
+
+Measured head-to-head in one process, median of 7, idle machine — the only way
+this question can be answered:
+
+| | pipeline | gigatoken |
+|---|---:|---:|
+| median | **881 MB/s** | 590 MB/s |
+| cells won | **15 / 20** | 5 / 20 |
+| gpt2 | 698 | 554 (1.26× pipeline) |
+| llama-3 | 947 | 612 (1.55× pipeline) |
+
+The split is by script. gigatoken wins Latin and dense text (english 0.87×, code
+0.82×); pipeline wins everything else, decisively (chinese 1.90×, korean 1.75×,
+arabic 1.67×, greek 1.60×, russian 1.55×, thai 1.53×).
+
+pipeline pays one cost gigatoken structurally does not: tk-encode exposes no
+flat-`u32` entry point, so the adapter restates `Vec<PipelineToken>` as `u32`
+while gigatoken writes straight into the caller's buffer. Measured by building
+pipeline once with that copy removed: **+1% to +8%, median ~4%** — real, charged
+to pipeline as an API-forced cost, and not the story.
+
+### Multi-thread scaling
+
+gpt2/english, performance cores only, efficiency against perfect linear:
+
+| engine | 1t | 2t | 4t | 8t | 8t efficiency |
 |---|---:|---:|---:|---:|---:|
-| pipeline ([#2279](https://github.com/huggingface/tokenizers/pull/2279)) | 70 | 62 | **8** | 489.0 | 1519.8 |
-| tokie 0.1.4 | 70 | 52 | **18** | 70.1 | 419.7 |
-| fastokens 0.3.1 | 40 | 40 | 0 | 68.2 | 104.0 |
-| tiktoken-rs 0.12.0 | 30 | 30 | 0 | 31.1 | 43.8 |
-| mistral-common 1.10.0 (Python) | 10 | 10 | 0 | 13.4 | 16.0 |
-| tokenizers 0.23.1 (reference) | 70 | — | — | 11.7 | 36.3 |
+| gigatoken | 1441 | 2811 | 5494 | 10764 | 93% |
+| pipeline | 1165 | 2280 | 4414 | 8708 | 93% |
+| tokie | 405 | 782 | 1539 | 3044 | 94% |
+| iree | 82 | 163 | 321 | 634 | 97% |
+| kitoken | 52 | 102 | 193 | 366 | 87% |
+| **tokenizers 0.23.1** | 10 | 17 | 33 | 47 | **60%** |
 
-Speedup over the released crate, **computed only over cells where the ids
-match** — a mismatched cell contributes nothing, because it is not the same
-computation:
+The reference is the worst scaler in the set, and that is the interesting number:
+its shared BPE cache serialises threads, so its deficit grows with core count
+rather than staying constant.
 
-| engine | median speedup | verified cells |
-|---|---:|---:|
-| pipeline | **46.2×** | 62 |
-| fastokens | 5.4× | 40 |
-| tokie | 3.6× | 52 |
-| tiktoken | 2.4× | 30 |
-| mistral-common | 1.1× | 10 |
+### Two hazards this benchmark had to solve
 
-`pipeline`, per model (verified cells only):
+**Co-linking engines can silently corrupt an unrelated one.** executorch
+statically links its own PCRE2 (`libpcre2-8.a`, 332 exported symbols, plus a
+force-loaded `libregex_lookahead.a`); fastokens depends on the `pcre2` crate and
+its speed rests on PCRE2 JIT. Linked into the same binary, executorch's copy
+preempts it and **fastokens drops from ~55 MB/s to 3.4 — an 18× degradation with
+correct ids**, so no verification gate would ever catch it. Bisected: fastokens
+measures 61.5 / 56.3 / 61.1 MB/s beside iree / blingfire / llamacpp, and 3.4
+beside executorch. executorch is therefore measured in its own process and
+merged in, with its ids verified afterwards against the same cell's reference
+hash (40/40 match).
 
-| model | median | best corpus |
-|---|---:|---:|
-| llama-3 | 73.6× | 125.0× |
-| gpt2 | 65.0× | 118.9× |
-| deepseek-v4 | 48.0× | 63.9× |
-| mistral-nemo | 42.9× | 60.0× |
-| bert-wiki (WordPiece) | 12.1× | 151.6× |
-| llama-2 | 9.8× | 18.8× |
-| albert (Unigram) | 3.0× | 3.5× |
-
-### What the mismatches mean
-
-- **`pipeline` differs from the reference on all 8 albert (Unigram) cells.**
-  Byte-level BPE, WordPiece and llama-2 all agree. That is a concrete,
-  reproducible finding for #2279, not a benchmarking artefact.
-- **`tokie` differs on every bert-wiki (WordPiece) and albert (Unigram) cell**
-  — 18 in total — while matching on all byte-level BPE. It also **panics**
-  (index out of bounds, `encoder/simple.rs:169`) on a truncated vocabulary.
-  The driver catches that and records the cell rather than losing the run.
-- `fastokens` cannot load a `tokenizer.json` that omits `model.type`, which the
-  old gpt2 fixture does — hence 40 cells rather than 70, all of them matching.
-
-Caveats that belong with these numbers: the reference also computes byte
-offsets, word ids and an attention mask on the same pass, which the others do
-not, so part of every gap is offset bookkeeping. Warm cache flatters engines
-built around pretoken caches — which is most of the fast ones. And this is one
-machine, single-threaded.
-
-Phase breakdown for the reference on that run:
-
-```
-normalization        1.5 µs    0.0%
-pre-tokenization    90.5 ms   67.0%   <- the bottleneck
-core encoding       30.7 ms   22.7%
-post-processing     13.7 ms   10.1%
-```
-
-Pre-tokenization costs **2.9× the BPE merge loop**. It is broken out as its own
-phase for exactly this reason — folding it into "normalization" would hide the
-thing most worth optimising.
+**The footprint pass must not interleave with the timed passes.** Each cell's
+RSS measurement costs ~12 child processes, each loading a full model; run
+between cells, that churn evicts the next cell's warm pages. Footprint now runs
+as a second pass over the whole matrix, after all timing is complete.
 
 ## Running it
 

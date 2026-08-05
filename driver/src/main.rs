@@ -341,6 +341,9 @@ fn main() -> Result<()> {
     );
 
     let mut runs: Vec<Run> = Vec::new();
+    // Model + corpus behind each run, so the footprint pass below can rebuild
+    // the same cells without re-deriving them.
+    let mut cell_inputs: Vec<(Model, PathBuf)> = Vec::new();
     let started = Instant::now();
     let mut done = 0usize;
 
@@ -512,19 +515,6 @@ fn main() -> Result<()> {
                 }
             }
 
-            // Footprint: one child process per engine, after the timing is
-            // done so the spawn cost can never land inside a measurement.
-            if !args.no_memory {
-                for r in results.iter_mut().filter(|r| r.unsupported.is_none()) {
-                    if let Some((delta, peak)) =
-                        measure_memory(&r.tokenizer_name, &model, corpus_path)
-                    {
-                        r.rss_delta_mb = delta;
-                        r.rss_peak_mb = peak;
-                    }
-                }
-            }
-
             // Scripted engines: the interpreter re-runs the same protocol and
             // reports back. Timed inside the interpreter, so process start-up
             // and imports are excluded — but still a different class, and
@@ -576,6 +566,7 @@ fn main() -> Result<()> {
                 }
             }
 
+            cell_inputs.push((model.clone(), corpus_path.clone()));
             runs.push(Run {
                 dataset_metadata: DatasetMetadata {
                     file_size_bytes: bytes,
@@ -594,6 +585,37 @@ fn main() -> Result<()> {
                 started.elapsed().as_secs_f64(),
                 per * (cells - done) as f64
             );
+        }
+    }
+
+    // ---- Footprint: a SECOND pass, after ALL timing is finished. ----
+    //
+    // This must not be interleaved with the timed passes, and the reason is
+    // measured rather than theoretical. Each cell's footprint costs ~12 child
+    // processes, every one loading a full model (llama-3's config alone is
+    // 16 MB) and holding 20-150 MB resident. Run between cells, that churn
+    // evicts the next cell's warm pages and its cost lands in the NEXT
+    // measurement: fastokens on deepseek-v4/english measured 3.5 MB/s
+    // interleaved against 62.3 MB/s with `--no-memory` on the identical
+    // binary — an 18x error, in the throughput column, caused entirely by the
+    // memory column. Separating the passes costs one extra walk of the matrix
+    // and removes the interference completely.
+    if !args.no_memory {
+        let total = runs.len();
+        eprintln!(
+            "footprint pass: {total} cells (kept separate from timing — the child \
+             processes would otherwise evict the next cell's caches)"
+        );
+        for (i, (run, (model, corpus))) in runs.iter_mut().zip(&cell_inputs).enumerate() {
+            for r in run.results.iter_mut().filter(|r| r.unsupported.is_none()) {
+                if let Some((delta, peak)) = measure_memory(&r.tokenizer_name, model, corpus) {
+                    r.rss_delta_mb = delta;
+                    r.rss_peak_mb = peak;
+                }
+            }
+            if (i + 1) % 10 == 0 {
+                eprintln!("  footprint {}/{total}", i + 1);
+            }
         }
     }
 
