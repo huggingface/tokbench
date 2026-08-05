@@ -1,0 +1,15 @@
+[package]
+name = "tokbench-fastokens"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "tokbench engine: fastokens (Crusoe/Atero) byte-level BPE."
+
+[dependencies]
+tokbench-core.workspace = true
+
+# `default-features = false` drops `hf-hub`/`ureq`. The benchmark loads models
+# from disk that `make models` already fetched; letting an engine reach the
+# network mid-run would put download latency inside a measurement.
+fastokens = { version = "=0.3.1", default-features = false }

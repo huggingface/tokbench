@@ -1,0 +1,15 @@
+[package]
+name = "tokbench-llamacpp"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "tokbench engine: llama.cpp's built-in tokenizer (llama_tokenize)."
+
+[dependencies]
+tokbench-core.workspace = true
+
+# llama-cpp-2 builds all of llama.cpp (and pulls GPU backends unless disabled)
+# for what is, here, one function. A direct bindgen shim over llama.h is the
+# lighter path — see src/lib.rs.
+# llama-cpp-2 = { version = "0.1.154", default-features = false }

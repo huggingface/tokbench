@@ -1,0 +1,12 @@
+[package]
+name = "tokbench-core"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The fairness contract and the single timing loop every tokbench engine is measured through."
+
+# Deliberately zero dependencies. This crate defines what a fair measurement
+# is; anything it pulled in would be linked into every engine's process and
+# could perturb the numbers it exists to protect.
+[dependencies]

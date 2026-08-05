@@ -1,0 +1,45 @@
+[package]
+name = "tokbench-binsize"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Minimal program linking exactly one engine, so its contribution to a binary can be measured."
+
+# Deliberately NOT part of the driver. A `src/bin/` inside `tokbench` would
+# link clap, serde and regex too, and those megabytes would swamp the number
+# this crate exists to isolate. Here the only things linked are core (which has
+# no dependencies) and the single engine under test.
+[dependencies]
+tokbench-core.workspace = true
+
+tokbench-hf-tokenizers = { path = "../engines/hf-tokenizers", optional = true }
+tokbench-pipeline = { path = "../engines/pipeline", optional = true }
+tokbench-fastokens = { path = "../engines/fastokens", optional = true }
+tokbench-tokie = { path = "../engines/tokie", optional = true }
+tokbench-tiktoken = { path = "../engines/tiktoken", optional = true }
+tokbench-rust-gems-bpe = { path = "../engines/rust-gems-bpe", optional = true }
+tokbench-wordchipper = { path = "../engines/wordchipper", optional = true }
+tokbench-sentencepiece = { path = "../engines/sentencepiece", optional = true }
+tokbench-blingfire = { path = "../engines/blingfire", optional = true }
+tokbench-gigatoken = { path = "../engines/gigatoken", optional = true }
+tokbench-llamacpp = { path = "../engines/llamacpp", optional = true }
+tokbench-iree = { path = "../engines/iree", optional = true }
+tokbench-executorch = { path = "../engines/executorch", optional = true }
+
+[features]
+# No default: an empty build is the baseline every engine is measured against.
+default = []
+hf-tokenizers = ["dep:tokbench-hf-tokenizers"]
+pipeline = ["dep:tokbench-pipeline"]
+fastokens = ["dep:tokbench-fastokens"]
+tokie = ["dep:tokbench-tokie"]
+tiktoken = ["dep:tokbench-tiktoken"]
+rust-gems-bpe = ["dep:tokbench-rust-gems-bpe"]
+wordchipper = ["dep:tokbench-wordchipper"]
+sentencepiece = ["dep:tokbench-sentencepiece"]
+blingfire = ["dep:tokbench-blingfire"]
+gigatoken = ["dep:tokbench-gigatoken"]
+llamacpp = ["dep:tokbench-llamacpp"]
+iree = ["dep:tokbench-iree"]
+executorch = ["dep:tokbench-executorch"]

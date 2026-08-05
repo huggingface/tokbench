@@ -1,0 +1,14 @@
+[package]
+name = "tokbench-executorch"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "tokbench engine: ExecuTorch / pytorch-labs C++ tokenizers."
+
+[dependencies]
+tokbench-core.workspace = true
+# Needs a small C shim over the C++ classes; see src/lib.rs.
+
+[build-dependencies]
+# cc = "1"   # enable together with shim.cpp

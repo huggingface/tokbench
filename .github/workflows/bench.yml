@@ -1,0 +1,99 @@
+name: bench
+
+# Two jobs, on purpose:
+#   * `check` runs everywhere on every push -- it is the correctness gate, and
+#     it must be cheap and stable.
+#   * `bench` runs on a fixed, isolated runner, because throughput measured on
+#     a shared 2-vCPU cloud VM is noise. A number produced on a noisy runner is
+#     worse than no number: it looks authoritative and moves 30% between runs.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: build + verify protocol
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      # The harness owns the definition of a fair measurement, so its own tests
+      # are the thing that must never regress.
+      - name: core harness tests
+        run: cargo test -p tokbench-core
+
+      # The Python harness must stay behaviourally identical to the Rust one or
+      # scripted engines silently become incomparable. Its __main__ block
+      # asserts the chunker is lossless and pins the FNV-1a constants.
+      - name: python protocol self-check
+        run: python3 python/harness.py
+
+      - name: build all Rust engines
+        run: cargo check -p tokbench --features rust-engines --all-targets
+
+      - name: clippy
+        run: cargo clippy -p tokbench-core -p tokbench --features rust-engines -- -D warnings
+
+      - name: fmt
+        run: cargo fmt --all -- --check
+
+  bench:
+    name: measure
+    # Only on demand / on main: a benchmark on a PR from a fork would run on a
+    # different machine class and the comparison would be meaningless.
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: astral-sh/setup-uv@v6
+
+      - name: Fetch corpora and model artifacts
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: make fixtures models
+
+      - name: Package sizes
+        run: python3 scripts/package_size.py
+
+      - name: Binary size per engine
+        run: bash scripts/binsize.sh || echo "binsize failed; column omitted"
+
+      - name: Run the matrix
+        run: cargo run --release -p tokbench --features rust-engines -- --reps 5
+
+      # An id mismatch means two engines computed different things. That is a
+      # correctness signal, not a performance one, so it fails the job.
+      - name: Fail on id mismatches
+        run: |
+          python3 - <<'PY'
+          import json, sys
+          d = json.load(open("tokenizer_bench_results.json"))
+          bad = [f"{r_.get('model','?')}/{r_.get('corpus','?')} {e['tokenizer_name']}"
+                 for run in d.get("runs", [])
+                 for r_ in [run["dataset_metadata"]]
+                 for e in run["results"] if e.get("verified") is False]
+          if bad:
+              sys.exit("ids diverge from the reference: " + ", ".join(bad))
+          print("all measured engines agree with the reference")
+          PY
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: results
+          path: |
+            tokenizer_bench_results.json
+            package_sizes.json
+            binary_sizes.json
+          retention-days: 30

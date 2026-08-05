@@ -1,0 +1,11 @@
+[package]
+name = "tokbench-iree"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "tokbench engine: IREE's streaming C tokenizer."
+
+[dependencies]
+tokbench-core.workspace = true
+# Wired via a build.rs + bindgen shim over runtime/src/iree/tokenizer.

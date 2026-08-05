@@ -1,0 +1,21 @@
+[package]
+name = "tokbench-pipeline"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "tokbench engine: the HuggingFace target encode path (tokenizers PR #2279, tk-encode)."
+
+[dependencies]
+tokbench-core.workspace = true
+
+# PR #2279 — "poc(encode): target encode path — bitsplit + batched model +
+# fused cache probe". A BRANCH, not a tag, because the PR is open and still
+# moving. That is a deliberate trade-off: it tracks the work in progress, which
+# is the point of comparing against it, but it also means two runs a week apart
+# are not necessarily measuring the same code. Pin `rev = "..."` before quoting
+# any number from this engine anywhere durable.
+#
+# tk-encode is edition 2024, so this engine needs a recent toolchain; the rest
+# of the workspace does not.
+tk-encode = { git = "https://github.com/huggingface/tokenizers", branch = "poc/target-encode", package = "tk-encode" }

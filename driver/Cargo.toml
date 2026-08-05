@@ -1,0 +1,70 @@
+[package]
+name = "tokbench"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Rust driver that benchmarks every engine in engines/ through one timing loop, and renders the result in the dashboard."
+default-run = "tokbench"
+
+[dependencies]
+tokbench-core.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+clap = { version = "4", features = ["derive"] }
+regex = "1"
+open = "5"
+
+# Every engine is optional. The workspace must build on a machine with no
+# system libraries installed, so only the reference engine is on by default;
+# the rest are opted into per-CI-job (see .github/workflows/bench.yml), which
+# also keeps a broken third-party build from blocking the whole matrix.
+tokbench-hf-tokenizers = { path = "../engines/hf-tokenizers", optional = true }
+tokbench-pipeline = { path = "../engines/pipeline", optional = true }
+tokbench-fastokens = { path = "../engines/fastokens", optional = true }
+tokbench-tokie = { path = "../engines/tokie", optional = true }
+tokbench-tiktoken = { path = "../engines/tiktoken", optional = true }
+tokbench-rust-gems-bpe = { path = "../engines/rust-gems-bpe", optional = true }
+tokbench-wordchipper = { path = "../engines/wordchipper", optional = true }
+tokbench-sentencepiece = { path = "../engines/sentencepiece", optional = true }
+tokbench-blingfire = { path = "../engines/blingfire", optional = true }
+tokbench-gigatoken = { path = "../engines/gigatoken", optional = true }
+tokbench-llamacpp = { path = "../engines/llamacpp", optional = true }
+tokbench-iree = { path = "../engines/iree", optional = true }
+tokbench-executorch = { path = "../engines/executorch", optional = true }
+
+# minbpe / mistral-common / ai-tokenizer are NOT linked. They are benchmarked
+# by re-running the same protocol inside their own runtime
+# (engines/*/run.py, run.mjs) — see python/harness.py.
+
+[features]
+# The reference engine is the correctness oracle for every other cell, so a
+# build without it can measure throughput but cannot verify it.
+default = ["hf-tokenizers"]
+
+hf-tokenizers = ["dep:tokbench-hf-tokenizers"]
+pipeline = ["dep:tokbench-pipeline"]
+fastokens = ["dep:tokbench-fastokens"]
+tokie = ["dep:tokbench-tokie"]
+tiktoken = ["dep:tokbench-tiktoken"]
+rust-gems-bpe = ["dep:tokbench-rust-gems-bpe"]
+wordchipper = ["dep:tokbench-wordchipper"]
+sentencepiece = ["dep:tokbench-sentencepiece"]
+blingfire = ["dep:tokbench-blingfire"]
+gigatoken = ["dep:tokbench-gigatoken"]
+llamacpp = ["dep:tokbench-llamacpp"]
+iree = ["dep:tokbench-iree"]
+executorch = ["dep:tokbench-executorch"]
+
+# Pure-Rust engines: no system libraries, no interpreter. This set builds
+# anywhere cargo does, and is what CI runs on every push.
+rust-engines = [
+    "hf-tokenizers",
+    "pipeline",
+    "fastokens",
+    "tokie",
+    "tiktoken",
+    "rust-gems-bpe",
+    "wordchipper",
+]

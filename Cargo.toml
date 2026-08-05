@@ -1,0 +1,46 @@
+[workspace]
+resolver = "2"
+# Listed explicitly rather than `engines/*`: three engine folders
+# (minbpe, mistral-common, ai-tokenizer) hold a script, not a crate, because
+# they are benchmarked by re-running the protocol inside their own runtime.
+members = [
+    "core",
+    "driver",
+    "binsize",
+    "engines/hf-tokenizers",
+    "engines/pipeline",
+    "engines/fastokens",
+    "engines/tokie",
+    "engines/tiktoken",
+    "engines/rust-gems-bpe",
+    "engines/wordchipper",
+    "engines/sentencepiece",
+    "engines/blingfire",
+    "engines/gigatoken",
+    "engines/llamacpp",
+    "engines/iree",
+    "engines/executorch",
+]
+
+# Benchmark numbers are only comparable if every engine is compiled the same
+# way. These settings apply to every member, so no engine can win on profile
+# flags. `lto = "fat"` + `codegen-units = 1` is what a release consumer of these
+# libraries would ship; `debug = 1` keeps `perf`/Instruments symbols without
+# affecting codegen.
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+debug = 1
+
+[workspace.package]
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/huggingface/tokbench"
+
+[workspace.dependencies]
+tokbench-core = { path = "core" }
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

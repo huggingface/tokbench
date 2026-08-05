@@ -1,0 +1,16 @@
+[package]
+name = "tokbench-tokie"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "tokbench engine: tokie (chonkie) Aho-Corasick backtracking BPE / double-array WordPiece."
+
+[dependencies]
+tokbench-core.workspace = true
+
+# Default features only. The `build` feature pulls in `tokenizers`,
+# `tiktoken-rs`, `ureq` and `zip` for converting HF repos into `.tkz`; that is
+# a model-preparation concern (`make models`), not something the benchmark
+# process should link.
+tokie = { version = "=0.1.4", default-features = false }
