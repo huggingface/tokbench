@@ -55,11 +55,18 @@ AR_BIN="${AR:-ar}"
 # IREE's own default (runtime/src/iree/base/BUILD.bazel): the system allocator
 # is malloc/free via iree_allocator_libc_ctl. `iree_allocator_system()` is only
 # DECLARED when this macro is defined, so it is required, not optional.
-DEFINES=(-DIREE_ALLOCATOR_SYSTEM_CTL=iree_allocator_libc_ctl)
+#
+# NDEBUG is not a tuning choice either. IREE's root CMakeLists.txt sets
+# DEFAULT_CMAKE_BUILD_TYPE to Release, and CMake's Release adds `-O3 -DNDEBUG`;
+# iree/base/assert.h compiles every IREE_ASSERT to nothing under NDEBUG. So a
+# build WITHOUT it is a debug-assertions build: not what anyone deploys, and
+# slower in the hot loops because of the checks. Matching upstream's default is
+# both the fair configuration to measure and the one users actually get.
+DEFINES=(-DIREE_ALLOCATOR_SYSTEM_CTL=iree_allocator_libc_ctl -DNDEBUG)
 
-# -std=gnu17, not c17: iree/base/threading/processor.h uses `asm volatile`,
-# which strict ISO mode rejects.
-CFLAGS=(-O2 -std=gnu17 -fPIC -I "$SRC" "${DEFINES[@]}")
+# -O3 to match CMake's Release. -std=gnu17, not c17:
+# iree/base/threading/processor.h uses `asm volatile`, which strict ISO rejects.
+CFLAGS=(-O3 -std=gnu17 -fPIC -I "$SRC" "${DEFINES[@]}")
 
 echo "==> vendoring IREE tokenizer @ ${IREE_COMMIT:0:12}"
 

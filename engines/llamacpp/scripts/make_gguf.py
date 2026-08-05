@@ -192,10 +192,13 @@ def ensure_converter(tag: str) -> Path:
     with tarfile.open(tarball) as tf:
         wanted = [
             m for m in tf.getmembers()
-            if m.name.endswith("/convert_hf_to_gguf.py")
-            or f"/gguf-py/" in m.name
+            if m.name.endswith("/convert_hf_to_gguf.py") or "/gguf-py/" in m.name
         ]
-        tf.extractall(CACHE, members=wanted)
+        # `filter="data"` is the safe extraction mode and the default from 3.14;
+        # naming it explicitly silences the deprecation warning on 3.12/3.13 and
+        # is simply skipped on the older versions that lack it.
+        extra = {"filter": "data"} if hasattr(tarfile, "data_filter") else {}
+        tf.extractall(CACHE, members=wanted, **extra)
     tarball.unlink(missing_ok=True)
     if not script.is_file():
         raise SystemExit(f"converter not found in {tag} tarball")
@@ -234,14 +237,64 @@ def vocab_size(tokenizer_json: Path) -> int:
     return max(ids) + 1
 
 
-def phantom(token: str) -> str:
-    """llama.cpp's WordPiece spelling of a token.
+# Runs the converter in a subprocess, optionally with `get_vocab_base_pre`
+# forced to "default".
+#
+# That override is needed for WordPiece and ONLY for WordPiece. The converter
+# resolves `tokenizer.ggml.pre` by hashing a probe tokenization and looking the
+# digest up in a hard-coded table of ~85 known models; a tokenizer that is not
+# one of those 85 raises NotImplementedError, and bert-wiki is not one of them.
+#
+# Forcing the value is inert here rather than a fudge, and llama.cpp says so
+# itself -- `llama-vocab.cpp` guards the entire pre-tokenizer selection with
+#
+#     // for now, only BPE models have pre-tokenizers
+#     if (type == LLAMA_VOCAB_TYPE_BPE) { ... }
+#
+# and a "bert" vocabulary loads as LLAMA_VOCAB_TYPE_WPM, which never reads the
+# key. The override is therefore applied only on the BertModel path; on the BPE
+# path an unrecognised digest stays a hard failure, because there the name
+# picks the actual splitting regex and guessing it would be exactly the silent
+# wrongness this whole script is arranged to avoid.
+#
+# `runpy.run_path` with a non-`__main__` run name executes the converter's
+# module body (defining its classes) without running its `main()`, which leaves
+# a window to patch the class before the conversion starts.
+_RUNNER = """
+import runpy, sys
+mod = runpy.run_path(sys.argv[1], run_name="tokbench_converter")
+if sys.argv[2] == "force-default-pre":
+    mod["TextModel"].get_vocab_base_pre = lambda self, tokenizer: "default"
+sys.argv = ["convert_hf_to_gguf.py"] + sys.argv[3:]
+mod["main"]()
+"""
+
+
+def convert(script: Path, stage: Path, out: Path, force_default_pre: bool):
+    return subprocess.run(
+        [sys.executable, "-c", _RUNNER, str(script),
+         "force-default-pre" if force_default_pre else "-",
+         "--vocab-only", "--outfile", str(out), str(stage)],
+        capture_output=True, text=True,
+    )
+
+
+def wordpiece_view(tokenizer_json: Path, vocab: dict[int, str]) -> dict[int, str]:
+    """llama.cpp's spelling of a WordPiece vocabulary.
 
     `BertModel.set_vocab` rewrites the vocabulary on the way in: continuations
-    lose their `##`, everything else gains a U+2581. Replaying that here keeps
-    the verification exact for BERT instead of skipping it.
+    lose their `##` and everything else gains a U+2581 -- except tokens typed
+    CONTROL, which are passed through verbatim. Control status comes from the
+    `added_tokens` block, so `[UNK]`/`[CLS]`/`[SEP]` stay as they are while
+    `the` becomes `▁the`. Replaying the rewrite here keeps the verification
+    exact for BERT rather than excusing it.
     """
-    return token[2:] if token.startswith("##") else "▁" + token
+    doc = json.loads(tokenizer_json.read_text())
+    control = {t["id"] for t in doc.get("added_tokens", []) if t.get("special")}
+    return {
+        i: tok if i in control else (tok[2:] if tok.startswith("##") else "▁" + tok)
+        for i, tok in vocab.items()
+    }
 
 
 def build(name: str, script: Path, force: bool) -> tuple[bool, str]:
@@ -269,11 +322,8 @@ def build(name: str, script: Path, force: bool) -> tuple[bool, str]:
             json.dumps({"tokenizer_class": "PreTrainedTokenizerFast"})
         )
 
-        proc = subprocess.run(
-            [sys.executable, str(script), "--vocab-only",
-             "--outfile", str(out), str(stage)],
-            capture_output=True, text=True,
-        )
+        proc = convert(script, stage, out,
+                       force_default_pre=cfg["architectures"][0] == "BertModel")
         if proc.returncode != 0:
             out.unlink(missing_ok=True)
             tail = [ln for ln in proc.stderr.strip().splitlines() if ln.strip()]
@@ -289,7 +339,7 @@ def build(name: str, script: Path, force: bool) -> tuple[bool, str]:
         got = gguf_tokens(out, script.parent / "gguf-py")
         want = json_vocab(tokenizer_json)
         if cfg["architectures"][0] == "BertModel":
-            want = {i: phantom(t) for i, t in want.items()}
+            want = wordpiece_view(tokenizer_json, want)
     except Exception as exc:  # noqa: BLE001 - report, do not mask
         return False, f"wrote {out.name} but could not verify it: {exc}"
 

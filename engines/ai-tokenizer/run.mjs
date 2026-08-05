@@ -58,6 +58,15 @@
 //   * `decoder` is left empty because the encode path never reads it; only
 //     `decode()` does, and `decode()` is not benchmarked. Populating it would
 //     add load time and resident memory for nothing.
+//
+// One known limitation, in the library rather than in this adapter, disclosed
+// because it bounds what the green cells prove: ai-tokenizer resolves a byte
+// slice by decoding it with a plain `new TextDecoder("utf-8")`, which strips a
+// leading U+FEFF. A slice whose bytes begin EF BB BF therefore resolves to the
+// rank of the BOM-less token instead of its own. That can only be reached if
+// the input text itself contains U+FEFF; none of `data/fixtures` does, which is
+// why every cell verifies. Text with an embedded BOM would tokenize wrongly,
+// and the id hash would say so rather than hide it.
 
 import { readFileSync } from "node:fs";
 import { existsSync } from "node:fs";
@@ -178,7 +187,18 @@ try {
   // multi-byte sequence, of which byte-level vocabularies have a few hundred)
   // must live in the binary table. Substituting U+FFFD would file it under the
   // wrong key and lose it.
-  const strict = new TextDecoder("utf-8", { fatal: true });
+  //
+  // `ignoreBOM: true` is not optional, despite reading like a nicety. It means
+  // "do not treat a leading U+FEFF specially"; the DEFAULT is to silently strip
+  // it. llama-3's vocabulary has 8 tokens whose bytes start with EF BB BF, and
+  // 7 of them differ from another token only by that prefix -- so with the
+  // default decoder `ef bb bf 0a` decodes to "\n" and overwrites the real "\n"
+  // token, and every bare newline in the corpus comes out as id 62619 instead
+  // of 198. That is precisely the silent corruption the id hash exists to
+  // catch, and it did: llama-3 x {arabic, thai, dense} mismatched until this
+  // flag was set. gpt2 and mistral-nemo have no such tokens, so they passed
+  // either way -- a reminder that one green model does not verify an adapter.
+  const strict = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
   const pat = readFileSync(patternPath, "utf8").trim();
   const ranksText = readFileSync(ranksPath, "utf8");
 

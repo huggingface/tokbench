@@ -12,11 +12,10 @@
 //! So this script never fails. It probes, and it reports the outcome to the
 //! compiler as a single cfg flag:
 //!
-//! * found     → emit the link directives and `cfg(blingfire_linked)`.
-//!               `src/lib.rs` compiles the FFI declarations and the real
-//!               adapter.
-//! * not found → emit nothing. `src/lib.rs` compiles a stub whose `build()`
-//!               returns `Unsupported` naming the script that would fix it.
+//! * **found** — emit the link directives and `cfg(blingfire_linked)`, so
+//!   `src/lib.rs` compiles the FFI declarations and the real adapter.
+//! * **not found** — emit nothing, so `src/lib.rs` compiles a stub whose
+//!   `build()` returns `Unsupported` naming the script that would fix it.
 //!
 //! Both halves are type-checked the same way; the difference is which one is
 //! `#[cfg]`-selected. `cargo check -p tokbench-blingfire` therefore passes in
@@ -98,9 +97,15 @@ fn main() {
     let version = std::fs::read_to_string(vendor.join("PROVENANCE"))
         .ok()
         .and_then(|s| {
-            s.lines()
-                .find_map(|l| l.strip_prefix("tag:").map(|v| v.trim().to_string()))
+            s.lines().find_map(|l| {
+                // "tag: v0.1.8" -> "0.1.8". The report prints bare version
+                // numbers for every other engine; a stray `v` from the git tag
+                // would make this the only row spelled differently.
+                l.strip_prefix("tag:")
+                    .map(|v| v.trim().trim_start_matches('v').to_string())
+            })
         })
+        .filter(|v| !v.is_empty())
         .unwrap_or_else(|| "0.1.8".to_string());
     println!("cargo:rustc-env=TOKBENCH_BLINGFIRE_VERSION={version}");
 

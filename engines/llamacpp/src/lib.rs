@@ -54,6 +54,9 @@
 //! Rust engines. The only thing between the timer and the C++ is one `extern
 //! "C"` call — see `build.rs` for why the hot path is not wrapped in a shim.
 
+// Only the stub needs these at the top level; the wired engine imports its own
+// (larger) set inside the module below.
+#[cfg(not(llamacpp))]
 use tokbench_core::{Build, Engine, Model, Unsupported};
 
 /// The llama.cpp release this was linked against, resolved by `build.rs` from

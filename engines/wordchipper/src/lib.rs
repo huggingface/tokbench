@@ -105,12 +105,40 @@
 //! spellings that differ; an o200k model already arrives byte-identical to
 //! `OA_O200K_BASE_PATTERN` and needs no entry. Anything unrecognised is passed
 //! through verbatim as `RegexPattern::Adaptive`, which is the honest outcome:
-//! mistral-nemo's pattern is o200k-*like* but not o200k, gets no accelerator,
-//! and its number should say so.
+//! mistral-nemo's pattern is o200k-*like* but not o200k (`\p{N}` where o200k
+//! has `\p{N}{1,3}`, and no trailing `'s`/`'ll` group), so it gets no
+//! accelerator and its number should say so. It does: mistral-nemo measures
+//! 10-61 MB/s across the ten corpora where gpt2, on the mapped pattern,
+//! measures 58-206 MB/s. That gap is the lexer, not the merge loop.
 //!
 //! Equivalence is asserted nowhere and *verified* everywhere: if a mapped
 //! pattern were not equivalent, the spans would differ, the ids would differ,
 //! and the cell would be reported as a mismatch rather than as a win.
+//!
+//! # A known divergence: llama-3 on Korean
+//!
+//! One cell of the matrix does not verify: llama-3 × korean, where this engine
+//! emits 2,285 ids against the reference's 2,345. It is recorded here because
+//! it is a property of wordchipper, not a defect in the wiring, and the number
+//! should not be read as if it were.
+//!
+//! wordchipper has no merges list — `to_pair_vocab` reconstructs one from the
+//! vocabulary by taking every split of every span whose halves are both in the
+//! vocabulary. That reconstruction is lossy about *order*. On the pre-token
+//! `Ġìĺ¤íĽĦ`, rank-ordered BPE merges `Ġ`+`ìĺ` first because that pair has the
+//! lower id, which destroys the prefix `Ġìĺ¤` and yields
+//! `[39623, 45780, 75309]`; `BpeBacktrack`, searching the reconstructed pair
+//! table, instead finds the single token 124467 for the whole pre-token. The
+//! merge it uses is a genuine listed merge of llama-3, so the output is a
+//! legal — and shorter — tokenization; it is simply not the one the merge
+//! ordering produces.
+//!
+//! This was checked rather than assumed: an id-rank BPE simulated over the
+//! same vocabulary reproduces the reference's three ids exactly, so the
+//! divergence is in the reconstruct-and-backtrack strategy and not in the
+//! ranks, the pattern mapping, or the dropped entries above. The pre-token
+//! boundaries agree on both sides. It is one cell out of thirty: gpt2 and
+//! mistral-nemo verify on all ten corpora each, llama-3 on nine of ten.
 //!
 //! # Which span encoder ran
 //!

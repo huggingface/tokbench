@@ -104,9 +104,17 @@ fn main() {
         };
         println!("cargo:rustc-link-lib=dylib={cxx}");
     }
+    // Switches src/lib.rs from the stub to the real engine. Declared above via
+    // rustc-check-cfg so an unset `llamacpp` is a known cfg rather than a lint.
+    println!("cargo:rustc-cfg=llamacpp");
     println!(
         "cargo:rustc-env=TOKBENCH_LLAMACPP_VERSION={}",
         found.version
+    );
+    eprintln!(
+        "tokbench-llamacpp: linking llama.cpp {} from {}",
+        found.version,
+        found.libdir.to_string_lossy()
     );
 }
 
@@ -231,7 +239,11 @@ fn locate() -> Option<Found> {
 }
 
 fn pkg_config_var(arg: &str) -> Option<String> {
-    let out = Command::new("pkg-config").arg(arg).arg("llama").output().ok()?;
+    let out = Command::new("pkg-config")
+        .arg(arg)
+        .arg("llama")
+        .output()
+        .ok()?;
     if !out.status.success() {
         return None;
     }

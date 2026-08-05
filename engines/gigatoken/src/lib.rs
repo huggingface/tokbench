@@ -87,8 +87,6 @@
 // see Cargo.toml for why it cannot simply be a normal dependency.
 #[cfg(gigatoken_wired)]
 mod wired {
-    use tokbench_core::{Build, Class, Engine, Ids, Info, Model, Unsupported};
-
     use gigatoken_rs::load_tokenizer::hf::{load_hf_slice, HfTokenizer};
     use gigatoken_rs::EncodeState;
     use tokbench_core::{Build, Class, Engine, Ids, Info, Model, Unsupported};
@@ -180,9 +178,9 @@ pub struct Adapter;
 
 #[cfg(not(gigatoken_wired))]
 impl tokbench_core::Build for Adapter {
-    fn build(_model: &tokbench_core::Model)
-        -> Result<Box<dyn tokbench_core::Engine>, tokbench_core::Unsupported>
-    {
+    fn build(
+        _model: &tokbench_core::Model,
+    ) -> Result<Box<dyn tokbench_core::Engine>, tokbench_core::Unsupported> {
         Err(tokbench_core::Unsupported(
             "gigatoken not wired: its manifest declares `cargo-features`, which Cargo \
              rejects in a dependency and which breaks resolution for the whole \

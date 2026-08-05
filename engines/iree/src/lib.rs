@@ -63,6 +63,31 @@
 //!   false` does *not* do that — it still matches added/special tokens found in
 //!   the input. Leaving this flag clear is what makes the id streams comparable.
 //!
+//! # Model coverage, as measured
+//!
+//! Against the reference on the ten corpora, at the pinned commit:
+//!
+//! * **gpt2** — 10/10 byte-identical id streams.
+//! * **llama-2, llama-3, mistral-nemo, deepseek-v4** — most corpora identical,
+//!   a handful differing. Those are real disagreements about tokenization
+//!   (IREE runs to completion and returns ids; they just are not the same
+//!   ids), which is exactly what the `mismatch` column exists to surface.
+//! * **bert-wiki** (WordPiece) — completes cleanly but disagrees, dropping
+//!   most CJK and Thai content: 741 ids where the reference produces 7263 on
+//!   Chinese. Again a genuine difference, not a harness artefact.
+//! * **albert** (Unigram + NFKD) — IREE cannot encode it at all, and the
+//!   failure is upstream, not here. `finalize` returns RESOURCE_EXHAUSTED
+//!   claiming "output buffer full" after writing ~2379 ids — with 2.3 million
+//!   slots free. The real condition is that `has_pending()` never clears
+//!   because the NFKD stage cannot drain (an assert-enabled build trips
+//!   `nfkd.c:431`, "incomplete UTF-8 at end of normalizer input violates
+//!   interface contract"); `tokenizer.c` then misreports that as a capacity
+//!   problem. This reproduces through IREE's own one-shot
+//!   `iree_tokenizer_encode`, so it is not an artefact of driving the
+//!   streaming API. The adapter takes the documented precaution —
+//!   `pending_token_bound()` before `finalize` — and it does not help. The
+//!   cell is left to report as a mismatch rather than papered over.
+//!
 //! # Building the C side
 //!
 //! `scripts/vendor_iree.sh` fetches a sparse, blob-filtered, pinned checkout of

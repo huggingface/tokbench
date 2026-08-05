@@ -9,14 +9,14 @@
 //! Benchmarking `text_to_words` and labelling the row "BlingFire" would put a
 //! whitespace segmenter in a table of subword tokenizers, where it would post
 //! an enormous throughput number for a fundamentally cheaper job — the single
-//! most misleading thing this repository could publish. The harness would not
-//! even catch it: `ids_hash` would differ, the cell would read `mismatch`, and
-//! a reader skimming the throughput column would still walk away with the
-//! wrong impression.
+//! most misleading thing this repository could publish. The harness would
+//! label the cell `mismatch`, since the hash cannot agree, but that label is
+//! not much of a defence: a reader skimming the throughput column would still
+//! walk away thinking BlingFire tokenizes several times faster than it does.
 //!
 //! The comparable entry point is `TextToIds`, which BlingFire ships in its C
 //! library but no Rust crate binds. So this adapter links that library
-//! directly and declares the three functions it needs.
+//! directly and declares the four functions it needs.
 //!
 //! # Getting the library
 //!
@@ -72,17 +72,22 @@
 //! a newline each become tokens of their own (`220` = `Ġ`, `197` = `ĉ`,
 //! `198` = `Ċ`). BlingFire's compiled image runs its own word-breaker first,
 //! which treats a whitespace run as a boundary and then discards it. It has no
-//! way to encode the run itself. Measured against the reference over the first
-//! 20 chunks of each corpus, with the dummy prefix already switched off:
+//! way to encode the run itself. Measured against the reference at the
+//! driver's own chunking (`CHUNK_BYTES` = 10 KiB, `MAX_CHUNKS` = 100), with the
+//! dummy prefix already switched off, so these are the counts a run of the
+//! harness prints:
 //!
 //! | corpus  | reference ids | BlingFire ids | reference whitespace-only ids |
 //! |---------|---------------|---------------|-------------------------------|
-//! | english | 38 468        | 37 767        | 701                           |
-//! | code    | 103 680       | 76 965        | 26 715                        |
+//! | english | 38 472        | 37 770        | 702                           |
+//! | code    | 103 680       | 76 964        | 26 716                        |
 //!
 //! In both cases BlingFire's count equals the reference's count with every
 //! whitespace-only token removed — exactly, not approximately. On `code` that
-//! is 25.8% of the reference's output that BlingFire never produces.
+//! is 25.8% of the reference's output that BlingFire never produces. Strip the
+//! whitespace tokens from the reference and 98% of the remaining positions
+//! agree, which is what pins the cause on whitespace rather than on the
+//! vocabulary.
 //!
 //! Two consequences, and the second is the one that matters for reading the
 //! report:
@@ -102,9 +107,12 @@
 //! The number is still worth having — it is a real measurement of a real
 //! library on a real vocabulary — but it belongs behind that label.
 //!
-//! Non-Latin scripts diverge further still: on `russian` and `chinese` only
-//! 4% and 2% of positions agree even after whitespace is stripped from the
-//! reference, so the disagreement there is not a whitespace story at all.
+//! Non-Latin scripts diverge further still, and for a different reason: after
+//! stripping whitespace from the reference, agreement is 98.2% on `english`
+//! and 98.3% on `code` but collapses to 4.1% on `russian` and 1.7% on
+//! `chinese`. Whatever BlingFire's model does with non-ASCII, it is not what
+//! GPT-2's byte-level BPE does, so the disagreement outside Latin script is
+//! not a whitespace story at all.
 //!
 //! # Measurement notes
 //!
