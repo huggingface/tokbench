@@ -4,11 +4,25 @@ version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "tokbench engine: Microsoft BlingFire."
+description = "tokbench engine: Microsoft BlingFire (TextToIds, via libblingfiretokdll)."
+# Probes for libblingfiretokdll and links it when present. It never fails: with
+# no library it emits nothing and src/lib.rs compiles a stub returning
+# Unsupported, so this package builds on machines that have never heard of
+# BlingFire.
+build = "build.rs"
 
 [dependencies]
 tokbench-core.workspace = true
 
-# NOT the `blingfire` crate (1.0.0): it wraps only text_to_words /
-# text_to_sentences, which return strings, not token ids — see src/lib.rs.
-# Wiring this means linking libblingfiretokdll directly.
+# Deliberately NOT the `blingfire` crate (1.0.0). It wraps only text_to_words /
+# text_to_sentences, which return space-separated strings rather than token
+# ids — a whitespace segmenter, not something comparable to a subword
+# tokenizer. The id-producing entry point is TextToIds in Microsoft's C library
+# libblingfiretokdll, which no crate binds, so this engine declares the three C
+# functions itself and links the library. See src/lib.rs.
+#
+# No build-dependencies either: bindgen for a three-function ABI would be more
+# machinery than the extern block it generates, and would add a clang
+# requirement to a build that otherwise needs none.
+#
+# Obtain the library with: scripts/vendor_blingfire.sh

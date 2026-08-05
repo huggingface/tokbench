@@ -79,3 +79,11 @@ test:
 clean:
 	rm -f tokenizer_bench_results.json binary_sizes.json package_sizes.json
 	cargo clean
+
+# Serve the dashboard over http so it can auto-load the results file
+# (a file:// page cannot fetch a sibling file), then open it.
+.PHONY: dash
+dash:
+	@python3 -m http.server 8712 --bind 127.0.0.1 >/dev/null 2>&1 & \
+	 sleep 1; open http://127.0.0.1:8712/dashboard.html; \
+	 echo "serving on http://127.0.0.1:8712/dashboard.html (Ctrl-C the server with: pkill -f 'http.server 8712')"

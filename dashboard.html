@@ -5,6 +5,9 @@
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>tokbench — tokenizer benchmark dashboard</title>
 <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.1/dist/echarts.min.js"></script>
+<!-- echarts-gl adds bar3D. Optional: if it fails to load, the 3D panel falls
+     back to a grouped 2D bar chart rather than leaving a hole. -->
+<script src="https://cdn.jsdelivr.net/npm/echarts-gl@2.0.9/dist/echarts-gl.min.js"></script>
 <style>
   :root{
     --bg:#0b0d10; --panel:#12151a; --panel-2:#171b22; --line:#232935;
@@ -70,6 +73,20 @@
   .legend{display:flex;gap:14px;flex-wrap:wrap;color:var(--dim);font-size:11px;margin-top:8px}
   .legend span{display:flex;align-items:center;gap:5px}
   .sw{width:11px;height:11px;border-radius:3px;display:inline-block}
+
+  /* small multiples */
+  .sm-grid{display:grid;gap:12px;grid-template-columns:repeat(auto-fit,minmax(300px,1fr))}
+  .sm{background:var(--panel-2);border:1px solid var(--line);border-radius:10px;padding:8px 6px 4px}
+  .sm-title{font-size:12px;font-weight:600;color:var(--fg);padding:0 6px 2px;cursor:pointer}
+  .sm-title:hover{color:var(--accent);text-decoration:underline}
+  .sm-chart{width:100%;height:210px}
+
+  /* sortable tables */
+  th.sortable{cursor:pointer;user-select:none}
+  th.sortable:hover{color:var(--fg)}
+  th .arrow{opacity:.35;margin-left:4px;font-size:10px}
+  th.sorted .arrow{opacity:1;color:var(--accent)}
+  th.sorted{color:var(--fg)}
 </style>
 </head>
 <body>
@@ -194,56 +211,214 @@ let charts=[];
 function mk(el,opt){ if(!el) return; const c=echarts.init(el,null,{renderer:"canvas"}); c.setOption(opt); charts.push(c); return c; }
 window.addEventListener("resize",()=>charts.forEach(c=>c.resize()));
 
+/* Distinct, stable colour per engine so a series keeps its identity across
+   every chart on the page. */
+const SERIES=["#5b8cff","#3ddc97","#ffb020","#c77dff","#ff7ab6","#4ecdc4","#ff6b6b","#a8e063","#7c8cff"];
+function engColor(name){
+  const i=X&&X.engines?X.engines.indexOf(name):-1;
+  if(i>=0) return SERIES[i%SERIES.length];
+  return SERIES[Math.abs([...name].reduce((h,c)=>h*31+c.charCodeAt(0)|0,7))%SERIES.length];
+}
+
 /**
- * Heatmap. `rows`/`cols` are label arrays; `valueAt(row,col)` returns
- * {v, verified, meta} or null for "did not run".
+ * Line chart across languages: x = corpus, one line per engine.
+ *
+ * Replaces the old heatmap. A line is easier to read than a colour: the eye
+ * compares positions far better than shades, gaps show missing cells honestly,
+ * and crossing lines make "engine A wins on Latin, loses on CJK" immediately
+ * visible — which a grid of coloured squares never quite does.
+ *
+ * A HOLLOW marker means the ids disagree with the reference. The point is
+ * still plotted, because hiding it would misrepresent coverage, but it is
+ * visually demoted and the tooltip says so.
  */
-function heatmap(el, rows, cols, valueAt, metric, tip, onClick){
+function lineByCorpus(el, model, metric, compact){
   if(!el) return;
-  const data=[], raw=[];
-  let lo=Infinity, hi=-Infinity;
-  for(let y=0;y<rows.length;y++) for(let x=0;x<cols.length;x++){
-    const cellv=valueAt(rows[y],cols[x]);
-    if(!cellv||cellv.v==null||!isFinite(cellv.v)) continue;
-    const v=cellv.v, cv=metric.log?Math.log10(Math.max(v,1e-6)):v;
-    lo=Math.min(lo,cv); hi=Math.max(hi,cv);
-    data.push({value:[x,y,cv,v,cellv.verified===false?1:0], _c:cellv});
-    raw.push(v);
+  const cols=X.corpora;
+  const series=[];
+  for(const eng of X.engines){
+    const pts=cols.map(c=>{
+      const r=X.get(model,c,eng);
+      if(!r||r.unsupported) return null;
+      if(S.hideBad&&r.verified===false) return null;
+      const v=metric.val(X,model,c,eng);
+      return v==null||!isFinite(v)?null:{value:v,_r:r};
+    });
+    if(pts.every(p=>p===null)) continue;
+    const col=engColor(eng);
+    series.push({
+      name:eng,type:"line",connectNulls:false,symbolSize:compact?5:7,
+      lineStyle:{width:compact?1.5:2.2,color:col},
+      itemStyle:{color:col,
+        // hollow = unverified/mismatched
+        borderColor:col,borderWidth:2},
+      symbol:"circle",
+      data:pts.map(p=>p===null?null:({value:p.value,
+        itemStyle:p._r.verified===false?{color:"#0b0d10",borderColor:col,borderWidth:2}:{color:col},
+        _r:p._r})),
+    });
   }
-  if(!data.length){ el.innerHTML='<div class="empty">No data for this selection.</div>'; return; }
-  if(lo===hi){ lo-=0.5; hi+=0.5; }
-
-  // Centre the diverging ramp on parity so "slower than reference" reads red.
-  let vmLo=lo, vmHi=hi;
-  if(metric.center!=null && metric.log){
-    const c=Math.log10(metric.center), r=Math.max(Math.abs(hi-c),Math.abs(c-lo));
-    vmLo=c-r; vmHi=c+r;
-  }
-
-  const c = mk(el,{
-    grid:{left:8,right:14,top:8,bottom:8,containLabel:true},
-    tooltip:{...TOOLTIP,formatter:(p)=>tip(p.data._c,rows[p.value[1]],cols[p.value[0]],p.value[3])},
-    xAxis:{type:"category",data:cols,...AXIS,
-      axisLabel:{...AXIS.axisLabel,rotate:cols.length>7?32:0,fontSize:11},splitLine:{show:false}},
-    yAxis:{type:"category",data:rows,...AXIS,axisLabel:{...AXIS.axisLabel,fontSize:11},splitLine:{show:false}},
-    visualMap:{min:vmLo,max:vmHi,calculable:false,show:false,inRange:{color:metric.ramp}},
-    series:[{
-      type:"heatmap",data,
-      label:{show:true,fontSize:10,color:"#0b0d10",fontWeight:600,
-        formatter:(p)=>(p.value[4]?"✗ ":"")+metric.fmt(p.value[3])},
-      itemStyle:{borderColor:"#0b0d10",borderWidth:2,borderRadius:3},
-      emphasis:{itemStyle:{borderColor:"#e6e9ef",borderWidth:2}},
-      // Mismatched cells get a hard red border so they cannot be misread as a
-      // normal result at a glance.
-      markPoint:undefined,
-    }],
+  if(!series.length){ el.innerHTML='<div class="empty">No engine ran this model.</div>'; return; }
+  mk(el,{
+    grid:{left:6,right:10,top:compact?26:44,bottom:6,containLabel:true},
+    legend:compact?{show:false}:{data:series.map(s=>s.name),textStyle:{color:"#8b95a7"},
+      top:0,itemWidth:14,itemHeight:10,type:"scroll"},
+    tooltip:{...TOOLTIP,trigger:"axis",formatter(ps){
+      const c=cols[ps[0].dataIndex];
+      const body=ps.filter(p=>p.value!=null).sort((a,b)=>b.value-a.value).map(p=>{
+        const r=p.data&&p.data._r;
+        return `<div>${p.marker}${esc(p.seriesName)}: <b>${metric.fmt(p.value)}</b>`
+          +(r&&r.verified===false?' <span style="color:#ff5c5c">✗ ids differ</span>':"")+`</div>`;
+      }).join("");
+      return `<b>${esc(model)} / ${esc(c)}</b><br>${body}`;
+    }},
+    xAxis:{type:"category",data:cols,boundaryGap:false,...AXIS,
+      axisLabel:{...AXIS.axisLabel,rotate:cols.length>7?30:0,fontSize:compact?9:11}},
+    yAxis:{type:metric.log?"log":"value",name:compact?"":metric.label,
+      nameTextStyle:{color:"#8b95a7"},...AXIS,
+      axisLabel:{...AXIS.axisLabel,fontSize:compact?9:11,formatter:(v)=>fmt.count(v)}},
+    series,
   });
-  if(c){
-    c.setOption({series:[{data:data.map(d=>d.value[4]
-      ? {...d,itemStyle:{borderColor:"#ff5c5c",borderWidth:2,borderRadius:3}} : d)}]});
-    if(onClick) c.on("click",(p)=>onClick(rows[p.value[1]],cols[p.value[0]]));
+}
+
+/**
+ * 3D bars: x = language, y = engine, z = throughput.
+ *
+ * Needs echarts-gl. If it did not load, fall back to a grouped 2D bar of the
+ * same data rather than leaving an empty panel — the information matters more
+ * than the dimensionality.
+ *
+ * Height is log-scaled for the same reason the old colour scale was: the range
+ * spans three orders of magnitude, and on a linear axis every engine except
+ * the fastest is a flat smear on the floor.
+ */
+function bar3d(el, model, metric){
+  if(!el) return;
+  const cols=X.corpora, rows=X.engines.filter(e=>
+    X.corpora.some(c=>{const r=X.get(model,c,e); return r&&!r.unsupported;}));
+  if(!rows.length){ el.innerHTML='<div class="empty">No engine ran this model.</div>'; return; }
+
+  // bar3D exists only if echarts-gl loaded AND the browser gives us WebGL.
+  const gl = hasWebGL() && seriesTypeExists("bar3D");
+
+  const data=[]; let vmin=Infinity, vmax=-Infinity;
+  rows.forEach((e,yi)=>cols.forEach((c,xi)=>{
+    const r=X.get(model,c,e); if(!r||r.unsupported) return;
+    if(S.hideBad&&r.verified===false) return;
+    const v=metric.val(X,model,c,e); if(v==null||!isFinite(v)) return;
+    vmin=Math.min(vmin,v); vmax=Math.max(vmax,v);
+    data.push([xi,yi,metric.log?Math.log10(Math.max(v,1e-6)):v,v,r.verified===false?1:0]);
+  }));
+  if(!data.length){ el.innerHTML='<div class="empty">No data.</div>'; return; }
+
+  if(!gl){
+    // 2D fallback: grouped bars, engines as series.
+    mk(el,{
+      grid:{left:8,right:10,top:44,bottom:8,containLabel:true},
+      legend:{data:rows,textStyle:{color:"#8b95a7"},top:0,itemWidth:14,itemHeight:10,type:"scroll"},
+      tooltip:{...TOOLTIP,trigger:"axis",axisPointer:{type:"shadow"}},
+      xAxis:{type:"category",data:cols,...AXIS,axisLabel:{...AXIS.axisLabel,rotate:30,fontSize:10}},
+      yAxis:{type:metric.log?"log":"value",...AXIS,
+        axisLabel:{...AXIS.axisLabel,formatter:(v)=>fmt.count(v)}},
+      series:rows.map(e=>({name:e,type:"bar",barMaxWidth:14,itemStyle:{color:engColor(e)},
+        data:cols.map(c=>{const r=X.get(model,c,e);
+          if(!r||r.unsupported) return null;
+          const v=metric.val(X,model,c,e); return v==null||!isFinite(v)?null:v;})})),
+    });
+    const n=document.createElement("div"); n.className="legend";
+    n.innerHTML="<span>echarts-gl unavailable — showing the same data as grouped 2D bars</span>";
+    el.parentElement.appendChild(n);
+    return;
   }
-  return c;
+
+  mk(el,{
+    tooltip:{...TOOLTIP,formatter:(p)=>{
+      const [xi,yi,,v,bad]=p.value;
+      return `<b>${esc(rows[yi])}</b><br>${esc(model)} / ${esc(cols[xi])}<br>`
+        +`${metric.fmt(v)} ${metric.label}`+(bad?'<div style="color:#ff5c5c">✗ ids differ from reference</div>':"");
+    }},
+    visualMap:{show:false,min:Math.log10(Math.max(vmin,1e-6)),max:Math.log10(Math.max(vmax,1e-6)),
+      dimension:2,inRange:{color:["#153a5b","#0f6b63","#4ba64a","#c2b52e","#ff7a4d","#ff4d6d"]}},
+    xAxis3D:{type:"category",data:cols,name:"language",
+      axisLabel:{color:"#8b95a7",fontSize:10},nameTextStyle:{color:"#8b95a7"}},
+    yAxis3D:{type:"category",data:rows,name:"engine",
+      axisLabel:{color:"#8b95a7",fontSize:10},nameTextStyle:{color:"#8b95a7"}},
+    zAxis3D:{type:"value",name:`log10 ${metric.label}`,
+      axisLabel:{color:"#8b95a7",fontSize:10},nameTextStyle:{color:"#8b95a7"}},
+    grid3D:{boxWidth:150,boxDepth:70,boxHeight:60,
+      viewControl:{alpha:22,beta:32,distance:210,autoRotate:false},
+      axisLine:{lineStyle:{color:"#2a3140"}},
+      axisPointer:{lineStyle:{color:"#5b8cff"}},
+      splitLine:{lineStyle:{color:"#1a1f28"}},
+      environment:"#0b0d10"},
+    series:[{type:"bar3D",data,shading:"lambert",barSize:5,
+      emphasis:{label:{show:false},itemStyle:{color:"#e6e9ef"}}}],
+  });
+}
+
+let _webgl=null;
+function hasWebGL(){
+  if(_webgl!==null) return _webgl;
+  try{
+    const c=document.createElement("canvas");
+    _webgl=!!(c.getContext("webgl2")||c.getContext("webgl"));
+  }catch{ _webgl=false; }
+  return _webgl;
+}
+
+/** True when echarts-gl registered the given series type. */
+let _st={};
+function seriesTypeExists(t){
+  if(t in _st) return _st[t];
+  try{
+    const probe=document.createElement("div");
+    probe.style.cssText="width:10px;height:10px;position:absolute;left:-9999px";
+    document.body.appendChild(probe);
+    const c=echarts.init(probe);
+    let ok=true;
+    try{ c.setOption({series:[{type:t,data:[]}]}); }catch{ ok=false; }
+    // echarts logs but does not throw on an unknown series type, so also check
+    // the model actually materialised.
+    if(ok){ ok = !!(c.getModel && c.getModel().getSeriesByType &&
+                    c.getModel().getSeriesByType(t).length>0); }
+    c.dispose(); probe.remove();
+    return ok;
+  }catch{ return false; }
+}
+
+/** Grouped bar: engines within each model, median over languages. */
+function groupedBar(el, metric, onClick){
+  if(!el) return;
+  const models=X.models;
+  const series=X.engines.map(e=>({
+    name:e,type:"bar",barMaxWidth:16,itemStyle:{color:engColor(e),borderRadius:[3,3,0,0]},
+    data:models.map(m=>{
+      const vs=[];
+      for(const c of X.corpora){
+        const r=X.get(m,c,e); if(!r||r.unsupported) continue;
+        if(S.hideBad&&r.verified===false) continue;
+        const v=metric.val(X,m,c,e); if(v!=null&&isFinite(v)) vs.push(v);
+      }
+      return vs.length?median(vs):null;
+    }),
+  })).filter(s=>s.data.some(v=>v!=null));
+  if(!series.length){ el.innerHTML='<div class="empty">No data.</div>'; return; }
+  const c=mk(el,{
+    grid:{left:8,right:10,top:44,bottom:8,containLabel:true},
+    legend:{data:series.map(s=>s.name),textStyle:{color:"#8b95a7"},top:0,
+      itemWidth:14,itemHeight:10,type:"scroll"},
+    tooltip:{...TOOLTIP,trigger:"axis",axisPointer:{type:"shadow"},formatter(ps){
+      return `<b>${esc(models[ps[0].dataIndex])}</b><br>`
+        +ps.filter(p=>p.value!=null).sort((a,b)=>b.value-a.value)
+           .map(p=>`<div>${p.marker}${esc(p.seriesName)}: <b>${metric.fmt(p.value)}</b></div>`).join("");
+    }},
+    xAxis:{type:"category",data:models,...AXIS,axisLabel:{...AXIS.axisLabel,rotate:20,fontSize:11}},
+    yAxis:{type:metric.log?"log":"value",name:`median ${metric.label}`,
+      nameTextStyle:{color:"#8b95a7"},...AXIS,
+      axisLabel:{...AXIS.axisLabel,formatter:(v)=>fmt.count(v)}},
+    series,
+  });
+  if(c&&onClick) c.on("click",(p)=>onClick(models[p.dataIndex]));
 }
 
 /* ---- state --------------------------------------------------------------- */
@@ -305,28 +480,32 @@ function render(){
     </div>
 
     <div class="panel" style="margin-bottom:16px">
-      <h2>Overview — engine × model</h2>
-      <p class="hint">Median ${metric.label} across all ${X.corpora.length} languages. Click a cell to focus that model.</p>
-      <div id="hm-overview" class="chart h-lg"></div>
-      <div class="legend">
-        <span><i class="sw" style="background:${metric.ramp[0]}"></i>low</span>
-        <span><i class="sw" style="background:${metric.ramp[metric.ramp.length-1]}"></i>high</span>
-        <span><i class="sw" style="border:2px solid #ff5c5c;background:transparent"></i>ids differ from reference</span>
-        <span>blank = engine cannot run that model</span>
-        <span>log-scaled colour</span>
+      <h2>All languages — <span style="color:var(--fg)">${esc(S.model)}</span></h2>
+      <p class="hint">${metric.label} per language, ${metric.better} is better, log axis. One line per engine — this is where script coverage shows: CJK, Thai and Arabic behave nothing like Latin prose. A gap in a line means the engine could not run that cell; a hollow marker means its ids differ from the reference.</p>
+      <div id="c-lang" class="chart h-lg"></div>
+    </div>
+
+    <div class="panel" style="margin-bottom:16px">
+      <h2>Engine × language × ${metric.label} — <span style="color:var(--fg)">${esc(S.model)}</span></h2>
+      <p class="hint">The same data as a surface. Drag to rotate, scroll to zoom. Bar height is log-scaled, so equal steps are equal ratios.</p>
+      <div id="c-3d" class="chart h-xl"></div>
+    </div>
+
+    <div class="panel" style="margin-bottom:16px">
+      <h2>Overview — every engine on every model</h2>
+      <p class="hint">Median ${metric.label} across all ${X.corpora.length} languages, grouped by model. Click a bar to focus that model.</p>
+      <div id="c-overview" class="chart h-lg"></div>
+    </div>
+
+    <div class="panel" style="margin-bottom:16px">
+      <h2>Everything at once — every model × every language × every engine</h2>
+      <p class="hint">One panel per model, ${metric.label} across all ${X.corpora.length} languages, one line per engine. ${X.models.length}×${X.corpora.length}×${X.engines.length} cells on one screen. Colours match the legend above; click a panel title to focus that model.</p>
+      <div class="sm-grid">
+        ${X.models.map(m=>`<div class="sm">
+          <div class="sm-title" data-model="${esc(m)}">${esc(m)}</div>
+          <div id="sm-${cssId(m)}" class="sm-chart"></div>
+        </div>`).join("")}
       </div>
-    </div>
-
-    <div class="panel" style="margin-bottom:16px">
-      <h2>All languages — engine × corpus for <span style="color:var(--fg)">${esc(S.model)}</span></h2>
-      <p class="hint">${metric.label}, ${metric.better} is better. This is where an engine's script coverage shows: CJK, Thai and Arabic behave nothing like Latin prose.</p>
-      <div id="hm-lang" class="chart h-lg"></div>
-    </div>
-
-    <div class="panel" style="margin-bottom:16px">
-      <h2>One engine everywhere — <span style="color:var(--fg)">${esc(S.engine)}</span>, model × corpus</h2>
-      <p class="hint">${metric.label} for every model and language this engine ran.</p>
-      <div id="hm-engine" class="chart h-lg"></div>
     </div>
 
     <div class="grid two" style="margin-bottom:16px">
@@ -361,67 +540,32 @@ function render(){
       <div id="c-foot" class="chart"></div>
     </div>
 
+    <div class="panel" style="margin-bottom:16px">
+      <h2>Engines — aggregate over the whole matrix</h2>
+      <p class="hint">Click any column header to sort. Speedup is the median over verified cells only; a mismatched cell contributes nothing.</p>
+      <div class="tablewrap" id="tbl-summary"></div>
+    </div>
+
     <div class="panel">
-      <h2>Cells — ${esc(S.model)} / ${esc(S.corpus)}</h2>
-      <p class="hint">Every engine on the selected cell, including the ones that could not run.</p>
-      <div class="tablewrap"><table>
-        <thead><tr><th>Engine</th><th>MB/s</th><th>ns/B</th><th>tok/s</th><th>Tokens</th>
-          <th>Time</th><th>Load</th><th>RSS</th><th>Package</th><th>Class</th><th>IDs</th></tr></thead>
-        <tbody>${X.engines.map(e=>rowHtml(X.get(S.model,S.corpus,e),e)).join("")}</tbody>
-      </table></div>
+      <h2>Every cell — ${X.models.length} models × ${X.corpora.length} languages × ${X.engines.length} engines</h2>
+      <p class="hint">The full matrix, one row per cell, including the ones that could not run. Click any header to sort.</p>
+      <div class="tablewrap" id="tbl-matrix"></div>
     </div>`;
 
-  // --- overview: engine x model, median over corpora ---
-  heatmap($("#hm-overview"), X.engines, X.models, (eng,mod)=>{
-    const vals=[], bads=[];
-    for(const c of X.corpora){
-      const r=X.get(mod,c,eng); if(!r||r.unsupported||!keep(r)) continue;
-      const v=metric.val(X,mod,c,eng); if(v==null||!isFinite(v)) continue;
-      vals.push(v); bads.push(r.verified===false);
-    }
-    if(!vals.length) return null;
-    return {v:median(vals),verified:bads.some(Boolean)?false:true,n:vals.length,eng,mod};
-  }, metric, (c,eng,mod,v)=>`<b>${esc(eng)}</b> · ${esc(mod)}<br>
-      median ${metric.fmt(v)} ${metric.label}<br>
-      <span style="color:#8b95a7">${c.n} language${c.n>1?"s":""}</span>
-      ${c.verified===false?'<div style="color:#ff5c5c">⚠ some languages produce different ids</div>':""}`,
-    (eng,mod)=>{ S.model=mod; S.engine=eng; render(); });
+  buildTables(metric);
+  lineByCorpus($("#c-lang"), S.model, metric, false);
+  bar3d($("#c-3d"), S.model, metric);
+  groupedBar($("#c-overview"), metric, (mod)=>{ S.model=mod; render(); });
 
-  // --- all languages for the selected model ---
-  heatmap($("#hm-lang"), X.engines, X.corpora, (eng,cor)=>{
-    const r=X.get(S.model,cor,eng); if(!r||r.unsupported||!keep(r)) return null;
-    const v=metric.val(X,S.model,cor,eng); if(v==null||!isFinite(v)) return null;
-    return {v,verified:r.verified,r};
-  }, metric, (c,eng,cor,v)=>{
-    const r=c.r, b=X.get(S.model,cor,REF);
-    const sp=b&&!b.unsupported&&b.mbps?` · ${(r.mbps/b.mbps).toFixed(1)}× vs ref`:"";
-    return `<b>${esc(eng)}</b> · ${esc(S.model)}/${esc(cor)}<br>
-      ${fmt.mbps(r.mbps)} MB/s${sp}<br>${r.ns_per_byte.toFixed(2)} ns/B · ${fmt.count(r.total_tokens_produced)} tokens<br>
-      <span style="color:#8b95a7">${fmt.dur(r.mean_execution_time_seconds*1e9)}</span>
-      ${r.verified===false?'<div style="color:#ff5c5c">⚠ ids differ from reference</div>':""}
-      ${r.also_computes?`<div style="color:#8b95a7">also: ${esc(r.also_computes)}</div>`:""}`;
-  }, (eng,cor)=>{ S.corpus=cor; S.engine=eng; render(); });
-
-  // --- one engine across model x corpus ---
-  heatmap($("#hm-engine"), X.models, X.corpora, (mod,cor)=>{
-    const r=X.get(mod,cor,S.engine); if(!r||r.unsupported||!keep(r)) return null;
-    const v=metric.val(X,mod,cor,S.engine); if(v==null||!isFinite(v)) return null;
-    return {v,verified:r.verified,r};
-  }, metric, (c,mod,cor,v)=>`<b>${esc(S.engine)}</b><br>${esc(mod)} / ${esc(cor)}<br>
-      ${metric.fmt(v)} ${metric.label}<br>
-      <span style="color:#8b95a7">${fmt.count(c.r.total_tokens_produced)} tokens</span>
-      ${c.r.verified===false?'<div style="color:#ff5c5c">⚠ ids differ from reference</div>':""}`,
-    (mod,cor)=>{ S.model=mod; S.corpus=cor; render(); });
+  // Small multiples: EVERY model at once, each with every language and every
+  // engine. Nothing to click through — the whole matrix is on screen, and the
+  // eye picks out the model whose curve is shaped differently.
+  for(const m of X.models) lineByCorpus($(`#sm-${cssId(m)}`), m, metric, true);
 
   drawScaling();
   drawCell();
   wire();
 }
-
-/* Distinct, stable colour per engine so a series keeps its identity across
-   every chart on the page. */
-const SERIES=["#5b8cff","#3ddc97","#ffb020","#c77dff","#ff7ab6","#4ecdc4","#ff6b6b","#a8e063"];
-const engColor=(name)=>SERIES[Math.abs([...name].reduce((h,c)=>h*31+c.charCodeAt(0)|0,7))%SERIES.length];
 
 /**
  * Multi-thread scaling. The sweep is only run on the corpora named with
@@ -605,30 +749,126 @@ function drawCell(){
   });
 }
 
-function rowHtml(r,name){
-  if(!r) return `<tr><td style="color:var(--dim)">${esc(name)}</td><td colspan="10" style="color:var(--dim)">not run</td></tr>`;
-  if(r.unsupported) return `<tr><td><span style="color:var(--muted)">${esc(name)}</span>
-      <span class="badge b-dim">unsupported</span>
-      <div style="color:var(--dim);font-size:11px;white-space:normal;max-width:420px">${esc(r.unsupported)}</div></td>
-    <td colspan="10" style="color:var(--dim)">—</td></tr>`;
-  const idb=r.verified===true?'<span class="badge b-ok">match</span>'
-    :r.verified===false?'<span class="badge b-bad">differ</span>':'<span class="badge b-dim">unverified</span>';
-  const cls=r.engine_class==="native"?"b-ok":r.engine_class==="subprocess"?"b-warn":"b-dim";
-  const notes=[r.also_computes?`also ${esc(r.also_computes)}`:"",r.internally_parallel?"multi-threaded":"",
-    r.package_ref?esc(r.package_ref):""].filter(Boolean).join(" · ");
-  return `<tr>
-    <td><b>${esc(name)}</b> <span style="color:var(--dim);font-size:11px">${esc(r.engine_lang||"")}</span>
-      ${notes?`<div style="color:var(--dim);font-size:11px;white-space:normal;max-width:420px">${notes}</div>`:""}</td>
-    <td class="num">${fmt.mbps(r.mbps)}</td>
-    <td class="num">${r.ns_per_byte?r.ns_per_byte.toFixed(2):"—"}</td>
-    <td class="num">${fmt.count(r.total_tokens_produced/r.mean_execution_time_seconds)}</td>
-    <td class="num">${fmt.count(r.total_tokens_produced)}</td>
-    <td class="num">${fmt.dur(r.mean_execution_time_seconds*1e9)}</td>
-    <td class="num">${r.load_ms!=null?r.load_ms.toFixed(0)+" ms":"—"}</td>
-    <td class="num">${fmt.mb(r.rss_delta_mb)}</td>
-    <td class="num">${fmt.kb(r.crate_size_kb)}</td>
-    <td><span class="badge ${cls}">${esc(r.engine_class||"?")}</span></td>
-    <td>${idb}</td></tr>`;
+/* ---- sortable tables ----------------------------------------------------- */
+/* Every table sorts on every column. Sorting re-renders only that table's
+   markup, never the charts: redrawing seven small multiples and a WebGL scene
+   to reorder some rows would make a click feel broken. */
+
+const SORT={ summary:{key:"med",dir:-1}, matrix:{key:"mbps",dir:-1} };
+const TABLES={};
+
+const cssId=(s)=>String(s).replace(/[^a-zA-Z0-9_-]/g,"_");
+
+function renderTable(id){
+  const t=TABLES[id]; if(!t) return "";
+  const st=SORT[id];
+  const rows=[...t.rows].sort((a,b)=>{
+    const A=a[st.key], B=b[st.key];
+    // Nulls sink to the bottom in both directions — an engine that did not run
+    // should never top the table just because the sort flipped.
+    if(A==null&&B==null) return 0;
+    if(A==null) return 1;
+    if(B==null) return -1;
+    if(typeof A==="string"||typeof B==="string")
+      return st.dir*String(A).localeCompare(String(B));
+    return st.dir*(A-B);
+  });
+  const head=t.cols.map(c=>{
+    const on=st.key===c.key;
+    return `<th class="sortable${on?" sorted":""}" data-t="${id}" data-k="${c.key}" title="sort by ${esc(c.label)}">`
+      +`${c.label}<span class="arrow">${on?(st.dir>0?"▲":"▼"):"↕"}</span></th>`;
+  }).join("");
+  const body=rows.map(r=>`<tr>${t.cols.map(c=>c.cell(r)).join("")}</tr>`).join("");
+  return `<table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>`;
+}
+
+function paintTable(id){
+  const host=$(`#tbl-${id}`); if(host) host.innerHTML=renderTable(id);
+}
+
+function buildTables(metric){
+  const num=(v,f)=>`<td class="num">${v==null?"—":f(v)}</td>`;
+  const idBadge=(v)=>v===true?'<span class="badge b-ok">match</span>'
+    :v===false?'<span class="badge b-bad">differ</span>':'<span class="badge b-dim">—</span>';
+
+  // --- per-engine aggregate over the whole matrix ---
+  const ref=(m,c)=>{const r=X.get(m,c,REF); return r&&!r.unsupported?r.mbps:null;};
+  const summary=X.engines.map(e=>{
+    const cells=[], sp=[];
+    let ok=0, bad=0, unsup=0, rss=[], pkg=null, bin=null, cls="", lang="", ver="";
+    for(const m of X.models) for(const c of X.corpora){
+      const r=X.get(m,c,e); if(!r) continue;
+      if(r.unsupported){ unsup++; continue; }
+      cells.push(r.mbps);
+      if(r.verified===true) ok++; else if(r.verified===false) bad++;
+      if(r.rss_delta_mb!=null) rss.push(r.rss_delta_mb);
+      if(pkg==null&&r.crate_size_kb!=null) pkg=r.crate_size_kb;
+      if(bin==null&&r.binary_delta_kb!=null) bin=r.binary_delta_kb;
+      cls=cls||r.engine_class; lang=lang||r.engine_lang; ver=ver||r.engine_version;
+      const b=ref(m,c);
+      if(b&&r.verified===true) sp.push(r.mbps/b);
+    }
+    return {engine:e, lang, ver, cls, ran:cells.length, ok, bad, unsup,
+      med:cells.length?median(cells):null,
+      max:cells.length?Math.max(...cells):null,
+      speedup:sp.length?median(sp):null,
+      rss:rss.length?median(rss):null, pkg, bin};
+  }).filter(r=>r.ran||r.unsup);
+
+  TABLES.summary={rows:summary, cols:[
+    {key:"engine",label:"Engine",cell:r=>`<td><b>${esc(r.engine)}</b>
+      <span style="color:var(--dim);font-size:11px">${esc(r.lang||"")}</span>
+      ${r.ver?`<div style="color:var(--dim);font-size:11px;white-space:normal;max-width:340px">${esc(r.ver)}</div>`:""}</td>`},
+    {key:"ran",label:"Cells",cell:r=>num(r.ran,v=>v)},
+    {key:"ok",label:"IDs match",cell:r=>`<td class="num" style="color:var(--ok)">${r.ok||"—"}</td>`},
+    {key:"bad",label:"IDs differ",cell:r=>`<td class="num" style="color:${r.bad?"var(--bad)":"var(--dim)"}">${r.bad||"—"}</td>`},
+    {key:"unsup",label:"Unsupported",cell:r=>`<td class="num" style="color:var(--dim)">${r.unsup||"—"}</td>`},
+    {key:"med",label:"Median MB/s",cell:r=>num(r.med,fmt.mbps)},
+    {key:"max",label:"Max MB/s",cell:r=>num(r.max,fmt.mbps)},
+    {key:"speedup",label:"× vs ref",cell:r=>num(r.speedup,v=>v>=100?v.toFixed(0)+"×":v.toFixed(1)+"×")},
+    {key:"rss",label:"RSS",cell:r=>num(r.rss,fmt.mb)},
+    {key:"pkg",label:"Package",cell:r=>num(r.pkg,fmt.kb)},
+    {key:"bin",label:"+binary gz",cell:r=>num(r.bin,fmt.kb)},
+    {key:"cls",label:"Class",cell:r=>`<td><span class="badge ${r.cls==="native"?"b-ok":r.cls==="subprocess"?"b-warn":"b-dim"}">${esc(r.cls||"?")}</span></td>`},
+  ]};
+
+  // --- every cell ---
+  const matrix=[];
+  for(const m of X.models) for(const c of X.corpora) for(const e of X.engines){
+    const r=X.get(m,c,e); if(!r) continue;
+    const b=ref(m,c);
+    matrix.push({model:m, corpus:c, engine:e,
+      mbps:r.unsupported?null:r.mbps,
+      nsb:r.unsupported?null:r.ns_per_byte,
+      tokps:r.unsupported?null:r.total_tokens_produced/r.mean_execution_time_seconds,
+      tokens:r.unsupported?null:r.total_tokens_produced,
+      speedup:(!r.unsupported&&b)?r.mbps/b:null,
+      load:r.unsupported?null:r.load_ms,
+      rss:r.rss_delta_mb??null,
+      verified:r.unsupported?null:r.verified,
+      // Sortable as a string so "unsupported" rows group together.
+      status:r.unsupported?"unsupported":(r.verified===false?"differ":r.verified===true?"match":"unverified"),
+      why:r.unsupported||""});
+  }
+  TABLES.matrix={rows:matrix, cols:[
+    {key:"engine",label:"Engine",cell:r=>`<td><b>${esc(r.engine)}</b>${
+      r.why?`<div style="color:var(--dim);font-size:11px;white-space:normal;max-width:380px">${esc(r.why)}</div>`:""}</td>`},
+    {key:"model",label:"Model",cell:r=>`<td style="text-align:right">${esc(r.model)}</td>`},
+    {key:"corpus",label:"Language",cell:r=>`<td style="text-align:right">${esc(r.corpus)}</td>`},
+    {key:"mbps",label:"MB/s",cell:r=>num(r.mbps,fmt.mbps)},
+    {key:"speedup",label:"× vs ref",cell:r=>num(r.speedup,v=>v>=100?v.toFixed(0)+"×":v.toFixed(1)+"×")},
+    {key:"nsb",label:"ns/B",cell:r=>num(r.nsb,v=>v.toFixed(2))},
+    {key:"tokps",label:"tok/s",cell:r=>num(r.tokps,fmt.count)},
+    {key:"tokens",label:"Tokens",cell:r=>num(r.tokens,fmt.count)},
+    {key:"load",label:"Load ms",cell:r=>num(r.load,v=>v.toFixed(0))},
+    {key:"rss",label:"RSS",cell:r=>num(r.rss,fmt.mb)},
+    {key:"status",label:"IDs",cell:r=>r.status==="unsupported"
+      ?'<td><span class="badge b-dim">unsupported</span></td>'
+      :`<td>${idBadge(r.verified)}</td>`},
+  ]};
+
+  paintTable("summary");
+  paintTable("matrix");
 }
 
 function wire(){
@@ -639,6 +879,22 @@ function wire(){
   $("#selcorpus").onchange=(e)=>{S.corpus=e.target.value;render();};
   $("#selengine").onchange=(e)=>{S.engine=e.target.value;render();};
   $("#hidebad").onclick=()=>{S.hideBad=!S.hideBad;render();};
+
+  // Header clicks: same column flips direction, a new column starts descending
+  // (for numbers the interesting end is almost always the top).
+  document.querySelectorAll("th.sortable").forEach(th=>{
+    th.onclick=()=>{
+      const id=th.dataset.t, k=th.dataset.k, st=SORT[id];
+      if(st.key===k) st.dir=-st.dir; else { st.key=k; st.dir=-1; }
+      paintTable(id);
+      wire();           // the new headers need their handlers
+    };
+  });
+
+  // Small-multiple titles focus that model.
+  document.querySelectorAll(".sm-title").forEach(t=>{
+    t.onclick=()=>{ S.model=t.dataset.model; render(); };
+  });
 }
 
 /* ---- input --------------------------------------------------------------- */
@@ -695,6 +951,20 @@ const MOCK=(()=>{
   return {dataset_metadata:runs[0].dataset_metadata,results:runs[0].results,runs};
 })();
 $("#demo").addEventListener("click",()=>load(structuredClone(MOCK),"sample data (not a real measurement)"));
+
+/* Auto-load the results sitting next to this page. Only works when the page is
+   served over http (a file:// page cannot fetch a sibling file — browsers treat
+   every local file as its own origin). Falls back silently to the drop zone,
+   which is the only option for a file:// open. `make dash` serves and opens. */
+(async ()=>{
+  if(location.protocol==="file:") return;
+  try{
+    const res=await fetch("tokenizer_bench_results.json",{cache:"no-store"});
+    if(!res.ok) return;
+    const j=await res.json();
+    load(j,"tokenizer_bench_results.json (auto-loaded)");
+  }catch{ /* no results yet — the drop zone stands */ }
+})();
 
 if(typeof echarts==="undefined"){
   $("#app").innerHTML='<div class="notice bad"><b>Charting library did not load.</b> This page pulls ECharts from a CDN; '

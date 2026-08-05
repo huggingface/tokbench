@@ -293,40 +293,60 @@ pub fn measure(engine: &mut dyn Engine, chunks: &[String], reps: usize, warmup: 
     let bytes: usize = chunks.iter().map(|c| c.len()).sum();
     let mut out: Ids = Vec::with_capacity(bytes / 2);
 
-    // Untimed: correctness bookkeeping + cache fill.
     let mut all: Ids = Vec::new();
-    if warmup {
-        for c in chunks {
-            out.clear();
-            engine.encode(c, &mut out);
-            all.extend_from_slice(&out);
-        }
-    } else {
-        // Still need ids for verification, but from a single cold pass we
-        // then discard, so the timed passes below start cold-ish.
-        for c in chunks {
-            out.clear();
-            engine.encode(c, &mut out);
-            all.extend_from_slice(&out);
-        }
-    }
-    let tokens = all.len();
-    let hash = ids_hash(&all);
-    drop(all);
+    let secs;
 
-    let mut samples = Vec::with_capacity(reps);
-    for _ in 0..reps {
+    if warmup {
+        // Untimed pass: fills caches and captures the ids for verification.
+        for c in chunks {
+            out.clear();
+            engine.encode(c, &mut out);
+            all.extend_from_slice(&out);
+        }
+        let mut samples = Vec::with_capacity(reps);
+        for _ in 0..reps {
+            let t0 = Instant::now();
+            for c in chunks {
+                out.clear();
+                engine.encode(c, &mut out);
+                // Keep the optimiser from deleting the call.
+                std::hint::black_box(&out);
+            }
+            samples.push(t0.elapsed().as_secs_f64());
+        }
+        secs = median(samples);
+    } else {
+        // COLD. There is exactly one cold pass available per engine instance,
+        // so `reps` cannot apply: a second pass is warm by definition, and
+        // taking a median over "1 cold + n-1 warm" would report a warm number
+        // under a cold label. This measures the first pass and nothing else.
+        //
+        // (An earlier version of this function ran the same untimed pass in
+        // both branches and then timed `reps` passes regardless, which made
+        // `--no-warmup` silently identical to the warm path. Engines whose
+        // whole design is a pretoken cache — gigatoken, tokie, the pipeline —
+        // were the ones it misreported, and by the largest margin.)
         let t0 = Instant::now();
         for c in chunks {
             out.clear();
             engine.encode(c, &mut out);
-            // Keep the optimiser from deleting the call.
             std::hint::black_box(&out);
         }
-        samples.push(t0.elapsed().as_secs_f64());
+        secs = t0.elapsed().as_secs_f64();
+
+        // Ids are captured afterwards, on a now-warm pass. Same ids, and
+        // keeping the `extend` out of the timed region means the cold number
+        // is not inflated by the harness's own bookkeeping.
+        for c in chunks {
+            out.clear();
+            engine.encode(c, &mut out);
+            all.extend_from_slice(&out);
+        }
     }
 
-    let secs = median(samples);
+    let tokens = all.len();
+    let hash = ids_hash(&all);
+    drop(all);
     Measure {
         mbps: (bytes as f64 / (1024.0 * 1024.0)) / secs,
         ns_per_byte: secs * 1e9 / bytes as f64,

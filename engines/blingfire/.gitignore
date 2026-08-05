@@ -1,0 +1,6 @@
+# Everything scripts/vendor_blingfire.sh produces: a shallow clone of
+# BlingFire, its CMake build tree, the resulting libraries, and the compiled
+# .bin models. Large, reproducible from the script, and licensed under
+# BlingFire's own terms rather than this repo's — same reasoning as /data at
+# the workspace root.
+vendor/

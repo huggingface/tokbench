@@ -9,5 +9,22 @@ description = "tokbench engine: wordchipper (zspacelabs) HPC Rust tokenizer suit
 [dependencies]
 tokbench-core.workspace = true
 
-# Not yet enabled — see src/lib.rs. Uncomment together with the real adapter:
-# wordchipper = { version = "=0.9.2", default-features = false, features = ["std", "fast-hash", "huggingface"] }
+# `default-features = false` drops exactly one of the three defaults —
+# `parallel` — and keeps the other two (`std`, `fast-hash`) so this is
+# otherwise the configuration `cargo add wordchipper` gives you. See the
+# "Why `parallel` is off" section of src/lib.rs: the encode path measured here
+# is byte-identical either way, because `TokenEncoderOptions::default()` has
+# `parallel: false` and the rayon wrapper is only built when that is true.
+# Turning the cargo feature off makes the single-thread claim structural
+# rather than a default someone could flip, and keeps rayon out of the
+# `binsize` probe, which links this crate and would otherwise charge
+# wordchipper for a code path it never runs.
+#
+# Deliberately NOT enabling `huggingface`: in 0.9.2 the function it exists for,
+# `vocab_from_hf_tokenizer`, sits in a private `mod hf_factory` and is not
+# reachable from outside the crate, so the feature would pull the whole
+# `tokenizers` crate for nothing — and into the binsize number.
+wordchipper = { version = "=0.9.2", default-features = false, features = [
+    "std",
+    "fast-hash",
+] }
