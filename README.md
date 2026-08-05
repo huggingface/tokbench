@@ -131,20 +131,31 @@ to pipeline as an API-forced cost, and not the story.
 
 ### Multi-thread scaling
 
-gpt2/english, performance cores only, efficiency against perfect linear:
+Same discipline: only engines whose ids **match** on the cell, and only the
+cells all of them verify — llama-3/english and mistral-nemo/english.
+Performance cores only; efficiency is against perfect linear from 1 thread.
 
-| engine | 1t | 2t | 4t | 8t | 8t efficiency |
-|---|---:|---:|---:|---:|---:|
-| gigatoken | 1441 | 2811 | 5494 | 10764 | 93% |
-| pipeline | 1165 | 2280 | 4414 | 8708 | 93% |
-| tokie | 405 | 782 | 1539 | 3044 | 94% |
-| iree | 82 | 163 | 321 | 634 | 97% |
-| kitoken | 52 | 102 | 193 | 366 | 87% |
-| **tokenizers 0.23.1** | 10 | 17 | 33 | 47 | **60%** |
+| engine | 1t | 2t | 4t | 8t | 8t efficiency | × ref @8t |
+|---|---:|---:|---:|---:|---:|---:|
+| gigatoken | 1275 | 2480 | 4845 | **9517** | 93% | 200× |
+| pipeline | 868 | 1686 | 3301 | 6483 | 94% | 137× |
+| tokie | 119 | 230 | 448 | 865 | 91% | 18× |
+| wordchipper | 117 | 231 | 448 | 778 | 85% | 16× |
+| iree | 84 | 167 | 328 | 645 | 96% | 14× |
+| fastokens | 58 | 112 | 235 | 399 | 86% | 8× |
+| tiktoken | 37 | 69 | 135 | 252 | 86% | 5× |
+| kitoken | 37 | 70 | 135 | 240 | 80% | 5× |
+| llamacpp | 9 | 17 | 31 | 59 | 77% | 1.2× |
+| **tokenizers 0.23.1** | 10 | 18 | 32 | 47 | **60%** | 1.0× |
 
-The reference is the worst scaler in the set, and that is the interesting number:
-its shared BPE cache serialises threads, so its deficit grows with core count
-rather than staying constant.
+The reference is the worst scaler in the set, and that is the number with the
+most consequence: its shared BPE cache serialises threads, so its deficit
+*grows* with core count instead of staying constant — 1.0× against pipeline's
+137× at eight threads.
+
+blingfire is excluded here. It posts 93% efficiency on gpt2/english, but 0/10
+of its cells verify — it emits no whitespace tokens at all, so its curve
+describes a different computation.
 
 ### Two hazards this benchmark had to solve
 

@@ -423,7 +423,31 @@ function groupedBar(el, metric, onClick){
 
 /* ---- state --------------------------------------------------------------- */
 let DATA=null, X=null;
-const S={model:null,corpus:null,engine:null,metric:"mbps",hideBad:false};
+const S={model:null,corpus:null,engine:null,metric:"mbps",hideBad:false,commonOnly:true};
+
+/**
+ * The cells every engine in `names` ran AND verified.
+ *
+ * Cross-engine medians must be computed over this set, not over each engine's
+ * own cells. Engines cover different model families, so a per-engine median
+ * silently rewards whichever one declines the hard cases: on this data,
+ * ranking by own-cells median puts gigatoken (which skips WordPiece and
+ * Unigram entirely) above pipeline, and the order reverses once both are held
+ * to the same 12 cells.
+ */
+function commonCells(names){
+  let set=null;
+  for(const n of names){
+    const mine=new Set();
+    for(const m of X.models) for(const c of X.corpora){
+      const r=X.get(m,c,n);
+      if(r&&!r.unsupported&&r.verified===true) mine.add(m+"|"+c);
+    }
+    set = set===null ? mine : new Set([...set].filter(k=>mine.has(k)));
+    if(!set.size) break;
+  }
+  return set||new Set();
+}
 
 function render(){
   charts.forEach(c=>c.dispose()); charts=[];
@@ -477,6 +501,7 @@ function render(){
       <span class="lbl">corpus</span>
       <select id="selcorpus">${X.corpora.map(c=>`<option ${c===S.corpus?"selected":""}>${esc(c)}</option>`).join("")}</select>
       <button id="hidebad" class="${S.hideBad?"on":""}">${S.hideBad?"✓ ":""}Hide unverified</button>
+      <button id="commononly" class="${S.commonOnly?"on":""}" title="Rank only over cells every engine ran and verified — otherwise engines that skip hard models look faster than they are">${S.commonOnly?"✓ ":""}Common cells only</button>
     </div>
 
     <div class="panel" style="margin-bottom:16px">
@@ -580,7 +605,15 @@ function drawScaling(){
       +'Re-run with <code>--scaling &lt;corpus&gt;</code> (e.g. <code>--scaling english</code>).</span></div>';
     if(mtEl) mtEl.innerHTML=msg; if(effEl) effEl.innerHTML=msg; return;
   }
-  const rows=X.engines.map(e=>X.get(S.model,cor,e)).filter(r=>r&&!r.unsupported&&r.scaling?.length);
+  // Only engines whose ids MATCH on this cell. A scaling curve for a different
+  // id stream is a curve for a different computation — blingfire, for
+  // instance, posts 93% efficiency on gpt2/english while producing none of the
+  // whitespace tokens, so plotting it beside the others invites a false read.
+  const rows=X.engines.map(e=>X.get(S.model,cor,e))
+    .filter(r=>r&&!r.unsupported&&r.scaling?.length&&r.verified!==false);
+  const dropped=X.engines.map(e=>X.get(S.model,cor,e))
+    .filter(r=>r&&!r.unsupported&&r.scaling?.length&&r.verified===false)
+    .map(r=>r.tokenizer_name);
   if(!rows.length){ mtEl.innerHTML='<div class="empty">No scaling data for this model.</div>';
     effEl.innerHTML=mtEl.innerHTML; return; }
 
@@ -650,7 +683,8 @@ function drawScaling(){
   const note=document.createElement("div");
   note.className="legend";
   note.innerHTML=`<span>sweep corpus: <b style="color:var(--fg)">${esc(cor)}</b></span>
-    <span>each thread gets its own engine instance; documents pulled from a shared queue</span>`;
+    <span>each thread gets its own engine instance; documents pulled from a shared queue</span>
+    ${dropped.length?`<span style="color:var(--bad)">excluded (ids differ): ${dropped.map(esc).join(", ")}</span>`:""}`;
   effEl.parentElement.appendChild(note);
 }
 
@@ -788,6 +822,16 @@ function paintTable(id){
 
 function buildTables(metric){
   const num=(v,f)=>`<td class="num">${v==null?"—":f(v)}</td>`;
+  // Cross-engine aggregates are computed over the cells every engine verified,
+  // unless the user turns that off. See commonCells().
+  const ranked=X.engines.filter(e=>{
+    for(const m of X.models) for(const c of X.corpora){
+      const r=X.get(m,c,e); if(r&&!r.unsupported&&r.verified===true) return true;
+    }
+    return false;
+  });
+  const common=S.commonOnly?commonCells(ranked):null;
+  const inScope=(m,c)=>!common||common.has(m+"|"+c);
   const idBadge=(v)=>v===true?'<span class="badge b-ok">match</span>'
     :v===false?'<span class="badge b-bad">differ</span>':'<span class="badge b-dim">—</span>';
 
@@ -799,6 +843,7 @@ function buildTables(metric){
     for(const m of X.models) for(const c of X.corpora){
       const r=X.get(m,c,e); if(!r) continue;
       if(r.unsupported){ unsup++; continue; }
+      if(!inScope(m,c)) continue;
       cells.push(r.mbps);
       if(r.verified===true) ok++; else if(r.verified===false) bad++;
       if(r.rss_delta_mb!=null) rss.push(r.rss_delta_mb);
@@ -879,6 +924,7 @@ function wire(){
   $("#selcorpus").onchange=(e)=>{S.corpus=e.target.value;render();};
   $("#selengine").onchange=(e)=>{S.engine=e.target.value;render();};
   $("#hidebad").onclick=()=>{S.hideBad=!S.hideBad;render();};
+  $("#commononly").onclick=()=>{S.commonOnly=!S.commonOnly;render();};
 
   // Header clicks: same column flips direction, a new column starts descending
   // (for numbers the interesting end is almost always the top).
