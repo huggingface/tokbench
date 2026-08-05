@@ -71,6 +71,13 @@ of 5, warm, `add_special_tokens = false`, Apple M-series.
 | llamacpp | 6.4 | 0.4× | 2 | 18 |
 | executorch | 2.1 | 0.2× | 2 | 4 |
 
+`pipeline` is exempt from the verification gate for now, by request: it is an
+in-progress PR and all 8 of its mismatches are albert (Unigram). The exemption
+suppresses only the exclusion — its mismatch count is still reported in the
+coverage table below, and its mismatched cells are still drawn as mismatched.
+On this data it changes no ranking, because those cells fall outside the common
+set regardless.
+
 minbpe and mistral-common are excluded from this table: each supports only one
 model, and including them would collapse the common set to zero cells. Their
 own-cells figures are below.
