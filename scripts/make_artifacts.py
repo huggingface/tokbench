@@ -110,6 +110,38 @@ def split_pattern(cfg) -> tuple[str | None, str]:
     return None, f"{len(regexes)} sequential Split regexes — no single-pattern equivalent"
 
 
+def truncation_check(name: str, model: dict) -> str | None:
+    """Reject a vocabulary that has been cut down.
+
+    Never benchmark a truncated vocab. "Slim" test fixtures keep the config
+    but drop most of the vocabulary, and the result is not a tokenizer: the
+    merge table still references ids that no longer exist. Every number
+    measured on one is meaningless, and engines crash on them in ways that
+    say nothing about the engine — a truncated glm fixture made tokie 0.1.4
+    panic with `index out of bounds: len is 2951 but the index is 27300`,
+    which reads like a tokie bug and is not one.
+
+    The tell is a merge whose operands index past the end of the vocabulary.
+    """
+    vocab = model.get("vocab")
+    if not isinstance(vocab, dict) or not vocab:
+        return None
+    n = len(vocab)
+    top = max(vocab.values())
+
+    # A real vocabulary numbers its tokens 0..n-1. A "slim" fixture keeps a
+    # sample of entries but their ORIGINAL ids, so the id space is sparse:
+    # glm-5.2-slim has 2,951 entries whose ids run to 151,248. Any engine that
+    # sizes a table by entry count and indexes it by id then reads out of
+    # bounds — which is precisely how tokie panicked.
+    #
+    # A handful of reserved gaps is normal; two orders of magnitude is not.
+    if top + 1 > n * 1.01:
+        return (f"{n} vocabulary entries but ids run to {top} — sparse id space, "
+                f"i.e. a sampled/truncated vocabulary, not a real one")
+    return None
+
+
 def convert(model_dir: Path) -> None:
     tj = model_dir / "tokenizer.json"
     if not tj.exists():
@@ -123,6 +155,15 @@ def convert(model_dir: Path) -> None:
     # implementation infers BPE from the presence of `merges`, so this must
     # too, or genuinely-convertible models would be skipped.
     mtype = model.get("type") or ("BPE" if "merges" in model else None)
+
+    # Hard stop: a truncated vocabulary must never reach the benchmark.
+    if (why := truncation_check(model_dir.name, model)) is not None:
+        raise SystemExit(
+            f"\nREFUSING to prepare {model_dir.name}: {why}.\n"
+            f"Remove {model_dir} and use the real model. Numbers measured on a "
+            f"truncated vocabulary are meaningless, and engines fail on them in "
+            f"ways that misrepresent the engine.\n"
+        )
 
     if mtype != "BPE" or not isinstance(vocab, dict):
         print(f"  {model_dir.name}: {mtype} — no tiktoken/bpe-openai artifacts (correct: "
