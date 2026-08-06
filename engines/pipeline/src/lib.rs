@@ -47,7 +47,11 @@
 
 use tk_encode::pipeline::{Model, PipelineModelScratch, PipelineToken, PipelineTokenizer, Span};
 use tk_encode::Tokenizer;
-use tokbench_core::{Build, Class, Engine, Ids, Info, Model as BenchModel, Unsupported};
+use std::time::Instant;
+
+use tokbench_core::{
+    Build, Class, Engine, Ids, Info, Model as BenchModel, Phases, Unsupported,
+};
 
 pub struct Adapter {
     pipe: PipelineTokenizer,
@@ -116,5 +120,113 @@ impl Engine for Adapter {
         if r.is_ok() {
             out.extend(self.toks.iter().map(|t| t.id));
         }
+    }
+
+    /// Phase costs by **ablation**, not instrumentation.
+    ///
+    /// `encode_generic` is monomorphised on a `STAGE` constant, so the compiler
+    /// emits a separate function per prefix of the pipeline: frame only, frame
+    /// plus normalize, and so on up to the full encode. Each is real optimised
+    /// code with no timing branches inside the hot loop -- the reason the PR
+    /// carries the ladder at all -- so timing successive rungs and subtracting
+    /// attributes cost without perturbing what is measured.
+    ///
+    /// Read it differently from `hf-tokenizers`' breakdown. That one runs each
+    /// component and clocks it directly. This one subtracts two whole-pipeline
+    /// timings, so a phase's bucket here absorbs any effect it has on the
+    /// phases after it. The totals are honest; the attribution is a difference
+    /// of totals.
+    ///
+    /// ## Two artefacts this has to avoid, both found by getting them wrong
+    ///
+    /// **The word cache makes rung order matter.** Run the ladder cold and in
+    /// order and `STAGE_MODEL` fills the `WordCache`, so `STAGE_POSTPROCESS`
+    /// -- timed next, on the same text -- reads almost free. Measured that way
+    /// post-processing came out at 0.1% of gpt2/english against the reference
+    /// engine's 9.6%, which is an artefact of the ladder, not a property of the
+    /// pipeline. So a full encode runs first and is discarded: every rung then
+    /// sees the same warm cache, which is also the state the headline number is
+    /// measured in.
+    ///
+    /// **Minimum-of-N is the wrong statistic here.** Repeating a rung on one
+    /// chunk replays it against a cache that only gets warmer, so the minimum
+    /// converges on a best case the real encode never sees -- it reported 1.09
+    /// ms for a corpus that takes ~7 ms to encode. The median of a few reps
+    /// tracks the steady state instead.
+    ///
+    /// Differences can still come out slightly negative on a cheap stage
+    /// swamped by noise; those clamp to zero rather than report negative time.
+    ///
+    /// ## What the totals here are, and are not
+    ///
+    /// Warming each chunk before timing it buys clean attribution at a price:
+    /// these totals are the **fully warm** cost, and the headline number is not.
+    /// The harness times disjoint slices, so a timed pass meets words this
+    /// instance has often not seen; here every word is already in the
+    /// `WordCache`. On gpt2/english that is ~1.2 ms against ~6.8 ms of real
+    /// encode over the same chunks.
+    ///
+    /// So read the **shares**, which is what the chart stacks. Do not read a
+    /// bar height here as this engine's encode time, and do not compare bar
+    /// heights against `hf-tokenizers`, whose breakdown is instrumented and
+    /// cold. Comparing the two engines' *proportions* is fine and is the point.
+    ///
+    /// Only ever called outside the timed loop.
+    fn phases(&mut self, text: &str) -> Option<Phases> {
+        const PHASE_REPS: usize = 5;
+
+        // Warm first, discard. Every rung below then starts from the same cache
+        // state, and it is the state the headline number is measured in.
+        self.toks.clear();
+        self.pipe
+            .encode_generic::<{ PipelineTokenizer::STAGE_POSTPROCESS }>(
+                text,
+                false,
+                &mut self.pre_tokens,
+                &mut self.scratch,
+                &mut self.toks,
+            )
+            .ok()?;
+
+        // One monomorphised rung, median of `PHASE_REPS`. A macro because
+        // `STAGE` is a const generic argument: a closure cannot be generic over
+        // it, so each rung has to be spelled out as its own call.
+        macro_rules! rung {
+            ($stage:expr) => {{
+                let mut runs = [0u64; PHASE_REPS];
+                for slot in runs.iter_mut() {
+                    self.toks.clear();
+                    let t = Instant::now();
+                    let r = self.pipe.encode_generic::<{ $stage }>(
+                        text,
+                        false,
+                        &mut self.pre_tokens,
+                        &mut self.scratch,
+                        &mut self.toks,
+                    );
+                    *slot = t.elapsed().as_nanos() as u64;
+                    r.ok()?;
+                }
+                runs.sort_unstable();
+                runs[PHASE_REPS / 2]
+            }};
+        }
+
+        let frame = rung!(PipelineTokenizer::STAGE_FRAME);
+        let normalize = rung!(PipelineTokenizer::STAGE_NORMALIZE);
+        let split = rung!(PipelineTokenizer::STAGE_SPLIT);
+        let model = rung!(PipelineTokenizer::STAGE_MODEL);
+        let post = rung!(PipelineTokenizer::STAGE_POSTPROCESS);
+
+        // `frame` is the added-token scan and span setup that every rung pays.
+        // It is not one of the four reported phases, so it is folded into
+        // pre-tokenisation, which is where a reader looking for "the cost of
+        // finding the pieces" would expect it.
+        Some(Phases {
+            normalization_ns: normalize.saturating_sub(frame),
+            pre_tokenization_ns: frame + split.saturating_sub(normalize),
+            core_encoding_ns: model.saturating_sub(split),
+            post_processing_ns: post.saturating_sub(model),
+        })
     }
 }

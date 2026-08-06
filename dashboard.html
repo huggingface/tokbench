@@ -312,8 +312,12 @@ function bar3d(el, model, metric){
     const r=X.get(model,c,e); if(!r||r.unsupported) return;
     if(S.hideBad&&r.verified===false) return;
     const v=metric.val(X,model,c,e); if(v==null||!isFinite(v)) return;
+    if(metric.log&&v<=0) return;
     vmin=Math.min(vmin,v); vmax=Math.max(vmax,v);
-    data.push([xi,yi,metric.log?Math.log10(Math.max(v,1e-6)):v,v,r.verified===false?1:0]);
+    // Index 2 is the plotted value -- the real number, with the axis doing the
+    // log. Index 5 carries log10 for the colour ramp, which visualMap cannot
+    // scale by itself.
+    data.push([xi,yi,v,v,r.verified===false?1:0,Math.log10(Math.max(v,1e-6))]);
   }));
   if(!data.length){ el.innerHTML='<div class="empty">No data.</div>'; return; }
 
@@ -344,13 +348,16 @@ function bar3d(el, model, metric){
         +`${metric.fmt(v)} ${metric.label}`+(bad?'<div style="color:#ff5c5c">✗ ids differ from reference</div>':"");
     }},
     visualMap:{show:false,min:Math.log10(Math.max(vmin,1e-6)),max:Math.log10(Math.max(vmax,1e-6)),
-      dimension:2,inRange:{color:["#153a5b","#0f6b63","#4ba64a","#c2b52e","#ff7a4d","#ff4d6d"]}},
+      dimension:5,inRange:{color:["#153a5b","#0f6b63","#4ba64a","#c2b52e","#ff7a4d","#ff4d6d"]}},
     xAxis3D:{type:"category",data:cols,name:"language",
       axisLabel:{color:"#8b95a7",fontSize:10},nameTextStyle:{color:"#8b95a7"}},
     yAxis3D:{type:"category",data:rows,name:"engine",
       axisLabel:{color:"#8b95a7",fontSize:10},nameTextStyle:{color:"#8b95a7"}},
-    zAxis3D:{type:"value",name:`log10 ${metric.label}`,
-      axisLabel:{color:"#8b95a7",fontSize:10},nameTextStyle:{color:"#8b95a7"}},
+    // Log axis, real tick labels. Plotting log10 on a linear axis made a bar of
+    // height 2 mean 100 MB/s, which no reader should have to decode.
+    zAxis3D:{type:metric.log?"log":"value",name:metric.label,min:metric.log?undefined:0,
+      axisLabel:{color:"#8b95a7",fontSize:10,formatter:(v)=>metric.fmt(v)},
+      nameTextStyle:{color:"#8b95a7"}},
     grid3D:{boxWidth:260,boxDepth:130,boxHeight:110,
       viewControl:{alpha:20,beta:28,distance:290,autoRotate:false},
       axisLine:{lineStyle:{color:"#2a3140"}},
@@ -534,7 +541,7 @@ function render(){
 
     <div class="panel" style="margin-bottom:16px">
       <h2>Engine × language × ${metric.label} — <span style="color:var(--fg)">${esc(S.model)}</span></h2>
-      <p class="hint">The same data as a surface. Drag to rotate, scroll to zoom. Bar height is log-scaled, so equal steps are equal ratios.</p>
+      <p class="hint">The same data as a surface. Drag to rotate, scroll to zoom. Bar height is on a log axis, so equal steps are equal ratios.</p>
       <div id="c-3d" class="chart h-xl"></div>
     </div>
 
@@ -576,7 +583,7 @@ function render(){
       </div>
       <div class="panel">
         <h2>Where the time goes — ${esc(S.model)} / ${esc(S.corpus)}</h2>
-        <p class="hint">Share of encode time per stage. Pre-tokenization is broken out because it is usually the bottleneck.</p>
+        <p class="hint">Share of encode time per stage. Pre-tokenization is broken out because it is usually the bottleneck. <b>Two kinds of measurement.</b> <code>hf-tokenizers</code> clocks each component directly. <code>pipeline</code> subtracts successive monomorphised <code>STAGE</code> rungs, warm, so its bars are shares of its own cost, not times comparable to another engine's. Compare the proportions, not the heights.</p>
         <div id="c-phase" class="chart"></div>
       </div>
     </div>
