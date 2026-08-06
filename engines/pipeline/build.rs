@@ -26,16 +26,28 @@ fn main() {
     let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
     println!("cargo:rerun-if-changed={}", manifest.display());
 
-    // The `path = "..."` of the tk-encode dependency, so this never disagrees with what is linked.
-    let tree = std::fs::read_to_string(&manifest)
-        .ok()
-        .and_then(|text| {
-            text.lines()
-                .find(|line| line.trim_start().starts_with("tk-encode = "))
-                .and_then(|line| line.split_once("path = \""))
-                .and_then(|(_, rest)| rest.split_once('"'))
-                .map(|(path, _)| path.to_string())
-        })
+    let dep = std::fs::read_to_string(&manifest).ok().and_then(|text| {
+        text.lines()
+            .find(|line| line.trim_start().starts_with("tk-encode = "))
+            .map(str::to_string)
+    });
+
+    // A git dep pins a rev, and that rev *is* the answer -- nothing local to inspect and nothing
+    // that can drift. Emit it and stop.
+    if let Some(line) = dep.as_deref()
+        && let Some((_, rest)) = line.split_once("rev = \"")
+        && let Some((rev, _)) = rest.split_once('"')
+    {
+        println!("cargo:rustc-env=PIPELINE_TREE_VERSION=tk-encode {rev}");
+        return;
+    }
+
+    // A path dep points at a worktree, which CAN drift, so ask git what is actually there.
+    let tree = dep
+        .as_deref()
+        .and_then(|line| line.split_once("path = \""))
+        .and_then(|(_, rest)| rest.split_once('"'))
+        .map(|(path, _)| path.to_string())
         // tk-encode lives at <tree>/tokenizers/tk-encode; the repo root is two levels up.
         .map(|dep| {
             std::path::Path::new(&dep)
@@ -63,7 +75,7 @@ fn main() {
                 _ => "tk-encode (worktree not a git checkout)".to_string(),
             }
         }
-        None => "tk-encode (path dep not found in Cargo.toml)".to_string(),
+        None => "tk-encode (dependency not found in Cargo.toml)".to_string(),
     };
     println!("cargo:rustc-env=PIPELINE_TREE_VERSION={version}");
 }

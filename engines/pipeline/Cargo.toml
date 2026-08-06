@@ -26,4 +26,4 @@ tokbench-core.workspace = true
 #
 # tk-encode is edition 2024, so this engine needs a recent toolchain; the rest
 # of the workspace does not.
-tk-encode = { path = "/Users/arthurzucker/Work/tokenizers-2308/tokenizers/tk-encode", package = "tk-encode", features = ["fancy-regex"] }
+tk-encode = { git = "https://github.com/huggingface/tokenizers", rev = "795f9222", package = "tk-encode", features = ["fancy-regex"] }
