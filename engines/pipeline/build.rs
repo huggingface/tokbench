@@ -34,12 +34,17 @@ fn main() {
 
     // A git dep pins a rev, and that rev *is* the answer -- nothing local to inspect and nothing
     // that can drift. Emit it and stop.
-    if let Some(line) = dep.as_deref()
-        && let Some((_, rest)) = line.split_once("rev = \"")
-        && let Some((rev, _)) = rest.split_once('"')
-    {
-        println!("cargo:rustc-env=PIPELINE_TREE_VERSION=tk-encode {rev}");
-        return;
+    //
+    // Written as nested `if let` rather than a let-chain: this workspace is edition 2021, where let
+    // chains are not accepted, and a build script that does not compile takes the whole engine with
+    // it.
+    if let Some(line) = dep.as_deref() {
+        if let Some((_, rest)) = line.split_once("rev = \"") {
+            if let Some((rev, _)) = rest.split_once('"') {
+                println!("cargo:rustc-env=PIPELINE_TREE_VERSION=tk-encode {}", rev);
+                return;
+            }
+        }
     }
 
     // A path dep points at a worktree, which CAN drift, so ask git what is actually there.
