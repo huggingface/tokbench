@@ -1,6 +1,8 @@
 //! The HuggingFace **target encode path** — `PipelineTokenizer` from
 //! [tokenizers#2279](https://github.com/huggingface/tokenizers/pull/2279)
-//! ("bitsplit + batched model + fused cache probe").
+//! (`poc/target-encode`, which carries bitsplit) with the metaspace-runs
+//! pre-tokenizer from [#2296](https://github.com/huggingface/tokenizers/pull/2296)
+//! stacked on top.
 //!
 //! This is the interesting row in the table: same project as the reference
 //! engine, same `tokenizer.json`, so the difference between `hf-tokenizers`
@@ -8,44 +10,40 @@
 //! vocabulary or a different idea of what a token is. Every other pairing here
 //! compares across projects; this one is a controlled before/after.
 //!
-//! ## Getting this wrong is easy — a note for the next person
+//! Which makes verification matter more here, not less. A rewritten merge loop
+//! and pre-tokenizer is exactly the kind of change that can be very fast and
+//! subtly wrong on some script, so the `verified` flag against
+//! `tokenizers 0.23.1` is the whole point — a mismatch on any corpus is a bug
+//! report, not a benchmark result.
+//!
+//! ## Getting the entry point wrong is easy — a note for the next person
 //!
 //! `tk_encode::Tokenizer::from_file(..).encode_fast(..)` compiles, runs, and
-//! returns correct ids. It is also the **legacy** path that this PR carries
+//! returns correct ids. It is also the **legacy** path this PR carries
 //! alongside the new one, and it benchmarks ~100x slower than the work the PR
 //! is actually about. The target path is a different type entirely:
 //!
 //! ```ignore
-//! let legacy = tk_encode::Tokenizer::from_file(path)?;      // parse the config
-//! let pipe = PipelineTokenizer::try_from(&legacy)?;          // build the fast path
-//! pipe.encode_generic::<{ PipelineTokenizer::STAGE_POSTPROCESS }>(
-//!     text, add_special_tokens, &mut pre_tokens, &mut scratch, &mut out)?;
+//! let legacy = tk_encode::Tokenizer::from_file(path)?;   // parse the config
+//! let pipe = PipelineTokenizer::try_from(&legacy)?;       // build the fast path
+//! pipe.encode_generic::<{ PipelineTokenizer::STAGE_POSTPROCESS }>(text, false)?;
 //! ```
 //!
 //! `STAGE_POSTPROCESS` is the full pipeline; the lower `STAGE_*` constants are
 //! the ablation ladder (frame / normalize / split / model) and must NOT be used
 //! for a headline number, since they skip real work.
 //!
-//! ## Why the buffers live in the adapter
+//! ## Buffers, and the one cost this adapter adds
 //!
-//! `encode_generic` writes into caller-owned `pre_tokens` and `scratch`. Those
-//! are allocated once at build time and reused, which is the configuration the
-//! PR's own `ab_giga` harness measures and the one a server would run. Creating
-//! them per call would charge the engine an allocation and a first-touch of the
-//! whole token array on every encode — a cost that scales with token count, so
-//! it would quietly penalise token-dense corpora (Chinese emits ~3.5x the
-//! tokens of English for the same bytes) rather than measuring the encoder.
+//! On this branch `encode_generic` takes caller-owned `pre_tokens`, `scratch`
+//! and `output`, so they live in the adapter and are reused — the
+//! configuration a server runs and the one the PR's own bench measures.
 //!
-//! This is the same courtesy every other engine gets: `tokbench_core::measure`
-//! hands each of them a reused `out` buffer.
-//!
-//! ## The one cost this adapter adds
-//!
-//! `encode_generic` fills a `Vec<PipelineToken>` (a one-field `{ id: u32 }`
-//! struct), while the harness compares `Vec<u32>`. The `.map(|t| t.id)` copy
-//! below is therefore adapter overhead the PR's own bench does not pay. It is
-//! left in and timed rather than hidden with a transmute: it is small, it is
-//! honest, and a caller wanting ids out of this API pays it too.
+//! What is NOT elided is the `.map(|t| t.id)` below. `encode_generic` fills a
+//! `Vec<PipelineToken>` (a one-field `{ id: u32 }` struct) while the harness
+//! compares `Vec<u32>`, and tk-encode exposes no flat-`u32` entry point, so a
+//! caller wanting ids pays this restatement too. Measured at +1% to +8%
+//! (median ~4%) by building once with the copy removed.
 
 use tk_encode::pipeline::{Model, PipelineModelScratch, PipelineToken, PipelineTokenizer, Span};
 use tk_encode::Tokenizer;
@@ -53,7 +51,11 @@ use tokbench_core::{Build, Class, Engine, Ids, Info, Model as BenchModel, Unsupp
 
 pub struct Adapter {
     pipe: PipelineTokenizer,
-    /// Reused across calls; see the module docs.
+    /// Caller-owned and reused, which is what this branch's `encode_generic`
+    /// expects and what a server would do. Allocating per call would charge the
+    /// engine a malloc plus a first-touch of the whole token array every
+    /// document -- a cost that scales with TOKEN count, so it would penalise
+    /// token-dense scripts rather than measure the encoder.
     pre_tokens: Vec<Span>,
     scratch: PipelineModelScratch,
     toks: Vec<PipelineToken>,
@@ -88,11 +90,11 @@ impl Engine for Adapter {
     fn info(&self) -> Info {
         Info {
             name: "pipeline",
-            // Not a release: the branch head. Pin a rev before quoting this.
-            version: "tk-encode 0.23.2-dev.0 (PR #2279, poc/target-encode)",
+            // Not a release: the exact stacked tree that was measured.
+            version: "tk-encode (#2279 poc/target-encode + #2296 metaspace runs, e35dc99c)",
             lang: "rust",
             class: Class::Native,
-            url: "https://github.com/huggingface/tokenizers/pull/2279",
+            url: "https://github.com/huggingface/tokenizers/pull/2296",
             also_computes: "",
             internally_parallel: false,
         }

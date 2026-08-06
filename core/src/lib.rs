@@ -23,11 +23,15 @@
 //!    and mmap all happen before the timer starts, and are reported separately
 //!    as `load_ms`. An engine that front-loads work into a slow build is not
 //!    rewarded by the throughput column, but it does not get to hide it either.
-//! 4. **Warm cache, stated.** One full untimed pass over the corpus precedes
-//!    the timed passes, so engines with pretoken/word caches are measured in
-//!    the state a real `for doc in corpus { encode(doc) }` loop reaches. This
-//!    flatters cache-heavy engines by design — it is the regime users run in —
-//!    and `--reps 1 --no-warmup` reports the cold number for contrast.
+//! 4. **Warm engine, unseen text.** The corpus is cut into `reps + 1` disjoint
+//!    slices: one warms the engine, and every timed rep gets text it has never
+//!    seen. That is the regime a real server is in — warm process, new
+//!    document — and, critically, it is the only way to stop the benchmark
+//!    measuring memoization of its own input. Warming on the *same* chunks the
+//!    timed passes re-encode inflated a document-granularity cache by up to
+//!    **256x** (gigatoken on llama-2/dense) while barely moving a
+//!    word-granularity one, and nothing from outside distinguishes the two.
+//!    `--no-warmup` times only the genuinely cold first pass.
 //! 5. **One thread by default.** Several engines parallelise internally, which
 //!    silently turns a throughput comparison into a core-count comparison. The
 //!    headline is single-thread; engines that cannot be pinned to one thread
@@ -46,7 +50,7 @@
 //! the user pays it too. Adapters may not reach into private internals to skip
 //! work the public path performs.
 
-pub mod rss;
+pub mod mem;
 
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -247,9 +251,16 @@ pub struct Measure {
     pub ns_per_byte: f64,
     /// Median over `reps` passes, seconds.
     pub secs: f64,
+    /// Bytes in ONE timed slice — what `secs` refers to.
     pub bytes: usize,
+    /// Tokens over the whole corpus (the verification pass), not one slice.
     pub tokens: usize,
     pub ids_hash: u64,
+    /// True when the corpus could not supply `reps + 1` disjoint slices and
+    /// some text had to be encoded more than once. Such a cell measures the
+    /// engine's memoization as much as its speed; the report flags it rather
+    /// than presenting it as a clean number.
+    pub reused: bool,
 }
 
 /// Split a corpus into fixed-size chunks on char boundaries.
@@ -286,36 +297,93 @@ fn median(mut v: Vec<f64>) -> f64 {
 /// and no other, so the only thing that differs between two numbers is the
 /// engine.
 ///
-/// `warmup` runs one untimed pass (see fairness rule 4) which also captures
-/// the token count and id hash — computing them during a timed pass would
-/// charge the engine for the harness's bookkeeping.
+/// # No document is ever encoded twice inside a measurement
+///
+/// The corpus is cut into `reps + 1` **disjoint** slices: slice 0 warms, and
+/// each timed rep gets its own, never-before-seen slice. This is not fussiness;
+/// the earlier version warmed on a set of chunks and then timed *those same
+/// chunks* `reps` times, which measures memoization of the benchmark's own
+/// input rather than tokenization.
+///
+/// The distortion was enormous and engine-specific. An engine that caches at
+/// word granularity is barely affected, because words genuinely repeat inside
+/// one pass. An engine that caches at document granularity gets the whole
+/// answer back for a hash lookup — and how coarsely an engine caches is
+/// invisible from outside. Measured on gigatoken / llama-2, replay versus
+/// first-pass: english 1.1x (words, honest), chinese 20x, dense **256x**. The
+/// CJK corpora have no spaces, so the "word" was the entire 10 kB chunk and the
+/// cache degenerated into "have I seen this exact chunk before" — always yes
+/// under replay, essentially never yes in production.
+///
+/// Warming on *different* text is also the more faithful regime: a real server
+/// has a warm engine and a document it has not seen.
+///
+/// When the corpus cannot supply `reps + 1` disjoint slices, the run does not
+/// silently reuse text — it shrinks the slices, and if even that fails it sets
+/// [`Measure::reused`] so the report can flag the cell.
 pub fn measure(engine: &mut dyn Engine, chunks: &[String], reps: usize, warmup: bool) -> Measure {
-    let bytes: usize = chunks.iter().map(|c| c.len()).sum();
-    let mut out: Ids = Vec::with_capacity(bytes / 2);
-
+    let mut out: Ids = Vec::with_capacity(64 * 1024);
     let mut all: Ids = Vec::new();
     let secs;
+    let bytes;
+    let mut reused = false;
 
     if warmup {
-        // Untimed pass: fills caches and captures the ids for verification.
-        for c in chunks {
+        // reps timed slices + 1 warm-up slice, all disjoint.
+        let want = reps + 1;
+        let per = chunks.len() / want;
+        if per == 0 {
+            // Not enough distinct text. Say so rather than quietly replaying.
+            reused = true;
+        }
+        let per = per.max(1);
+        let slice = |i: usize| -> &[String] {
+            let start = (i * per) % chunks.len().max(1);
+            let end = (start + per).min(chunks.len());
+            &chunks[start..end]
+        };
+
+        // Warm-up on slice 0. Ids for verification come from the WHOLE corpus
+        // (below), not from this slice, so every engine is still hashed over
+        // identical text.
+        for c in slice(0) {
             out.clear();
             engine.encode(c, &mut out);
-            all.extend_from_slice(&out);
         }
-        let mut samples = Vec::with_capacity(reps);
-        for _ in 0..reps {
+
+        // Slices hold different text and therefore different byte counts, so
+        // the comparable quantity across reps is seconds PER BYTE, not seconds.
+        let mut spb = Vec::with_capacity(reps);
+        let mut timed_bytes = 0usize;
+        for r in 0..reps {
+            let s = slice(r + 1);
+            let sb: usize = s.iter().map(|c| c.len()).sum();
+            if sb == 0 {
+                continue;
+            }
             let t0 = Instant::now();
-            for c in chunks {
+            for c in s {
                 out.clear();
                 engine.encode(c, &mut out);
                 // Keep the optimiser from deleting the call.
                 std::hint::black_box(&out);
             }
-            samples.push(t0.elapsed().as_secs_f64());
+            spb.push(t0.elapsed().as_secs_f64() / sb as f64);
+            timed_bytes = sb;
         }
-        secs = median(samples);
+        // Report the median rate scaled to one slice, so `secs` stays a
+        // duration the reader can sanity-check against `bytes`.
+        bytes = timed_bytes;
+        secs = median(spb) * bytes as f64;
+
+        // Verification pass over the entire corpus, untimed.
+        for c in chunks {
+            out.clear();
+            engine.encode(c, &mut out);
+            all.extend_from_slice(&out);
+        }
     } else {
+        bytes = chunks.iter().map(|c| c.len()).sum();
         // COLD. There is exactly one cold pass available per engine instance,
         // so `reps` cannot apply: a second pass is warm by definition, and
         // taking a median over "1 cold + n-1 warm" would report a warm number
@@ -354,6 +422,7 @@ pub fn measure(engine: &mut dyn Engine, chunks: &[String], reps: usize, warmup: 
         bytes,
         tokens,
         ids_hash: hash,
+        reused,
     }
 }
 
@@ -614,15 +683,76 @@ mod tests {
         );
 
         let m = measure(&mut Bytes, &chunks, 3, true);
-        assert_eq!(m.bytes, text.len());
-        assert_eq!(m.tokens, text.len(), "one id per byte");
+        // `bytes` is ONE timed slice, not the whole corpus: reps run on
+        // disjoint slices, so there is no single duration covering everything.
+        assert!(m.bytes > 0 && m.bytes <= text.len());
+        // Tokens come from the verification pass, which does cover everything.
+        assert_eq!(m.tokens, text.len(), "one id per byte, whole corpus");
         assert!(m.mbps > 0.0 && m.mbps.is_finite());
 
-        // Same input through the same engine must hash identically; a
-        // different id stream must not.
         let again = measure(&mut Bytes, &chunks, 1, true);
         assert_eq!(m.ids_hash, again.ids_hash);
         assert_ne!(ids_hash(&[1, 2, 3]), ids_hash(&[3, 2, 1]));
+    }
+
+    /// No document may be encoded twice inside the timed region.
+    ///
+    /// This is the guard for the replay bug: warming on the same chunks the
+    /// timed passes then re-encode turns the measurement into a test of the
+    /// engine's memoization (gigatoken/llama-2 measured 256x too fast on
+    /// `dense` that way). Warm-up, each rep, and the verification pass must
+    /// touch disjoint slices, so no chunk is seen more than twice in total —
+    /// once by warm-up-or-a-rep, once by verification.
+    #[test]
+    fn timed_passes_never_replay_a_document() {
+        use std::collections::HashMap;
+        use std::sync::Mutex;
+
+        static SEEN: Mutex<Option<HashMap<String, usize>>> = Mutex::new(None);
+
+        struct Recording;
+        impl Engine for Recording {
+            fn info(&self) -> Info {
+                Info {
+                    name: "recording",
+                    version: "0",
+                    lang: "rust",
+                    class: Class::Native,
+                    url: "",
+                    also_computes: "",
+                    internally_parallel: false,
+                }
+            }
+            fn encode(&mut self, text: &str, out: &mut Ids) {
+                let mut g = SEEN.lock().unwrap();
+                *g.get_or_insert_with(HashMap::new)
+                    .entry(text.to_string())
+                    .or_insert(0) += 1;
+                out.push(text.len() as u32);
+            }
+        }
+
+        // 24 distinct chunks, 5 reps -> 6 slices of 4 chunks each.
+        let text: String = (0..24).map(|i| format!("{:-<1024}", format!("doc{i} "))).collect();
+        let chunks = chunk(&text, 1024, 100);
+        assert!(chunks.len() >= 24);
+
+        *SEEN.lock().unwrap() = Some(HashMap::new());
+        let m = measure(&mut Recording, &chunks, 5, true);
+        assert!(!m.reused, "24 chunks is enough for 5 reps + warm-up");
+
+        let seen = SEEN.lock().unwrap().take().unwrap();
+        let worst = seen.values().copied().max().unwrap_or(0);
+        assert!(
+            worst <= 2,
+            "a chunk was encoded {worst} times; timed slices must be disjoint \
+             (at most one timed/warm touch plus one verification touch)"
+        );
+        assert_eq!(
+            seen.len(),
+            chunks.len(),
+            "verification must still cover the whole corpus"
+        );
     }
 
     /// The work-stealing loop must hand every document to exactly one thread.

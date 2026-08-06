@@ -257,15 +257,20 @@ def main():
             print(f"  template {fam:10} unavailable ({getattr(e, 'code', type(e).__name__)})")
 
     total = 0
-    chats, agents = convos(400), agent_convos(300)
+    # Pull enough DISTINCT rows to fill every fixture without cycling. An
+    # earlier version used `chats * 4`, which duplicated 46-73% of segments —
+    # invisible to a chunk-level dedup check, and exactly the repetition the
+    # harness must not be fed. If a source runs dry the fixture ends short;
+    # short and honest beats padded with copies.
+    chats, agents = convos(4000), agent_convos(1000)
 
     for fam, c in compiled.items():
-        total += write(f"chat-{fam}", (render(c, m) for m in chats * 4), target)
+        total += write(f"chat-{fam}", (render(c, m) for m in chats), target)
 
     # Tool-calling traces: emitted per family too, since each serialises tool
     # calls differently and that difference is the point.
     tool_parts = []
-    for i, conv in enumerate(agents * 4):
+    for i, conv in enumerate(agents):
         fam = list(compiled)[i % len(compiled)] if compiled else None
         if fam:
             tool_parts.append(render(compiled[fam], conv, tools=TOOLS))

@@ -42,6 +42,37 @@ tokbench fixes the measurement, not the result:
 
 The contract is written out in full at the top of [`core/src/lib.rs`](core/src/lib.rs).
 
+## Results
+
+Static images below; **[open the interactive dashboard](https://huggingface.github.io/tokbench/dashboard.html)**
+for hover tooltips, sortable tables, per-model 3D views and the multi-thread
+scaling sweep. It is one self-contained HTML file — you can also clone the repo,
+open `dashboard.html` and drop any `tokenizer_bench_results.json` onto it.
+
+[![overall throughput](figs/01-overall.png)](https://huggingface.github.io/tokbench/dashboard.html)
+
+Every engine ranked over the cells it got byte-exact, in MB/s and in ns/byte.
+Log scale: the spread is three orders of magnitude.
+
+[![head to head](figs/03-headtohead.png)](https://huggingface.github.io/tokbench/dashboard.html)
+
+The controlled comparison. `pipeline` and `tokenizers 0.23.1` are the same
+project reading the same `tokenizer.json`, so the difference is the encode path
+and nothing else — 5–41× on every model and corpus. Against `gigatoken` the
+result splits by script: `pipeline` wins CJK (up to 2.15× on deepseek/chinese),
+loses ASCII-heavy text.
+
+[![per model](figs/02-per-model.png)](https://huggingface.github.io/tokbench/dashboard.html)
+
+Every model, every language, every engine that matched the reference ids.
+Dash pattern and marker identify the engine, so crossing lines stay readable.
+
+[![memory](figs/05-memory-metric.png)](https://huggingface.github.io/tokbench/dashboard.html)
+
+Why the footprint column is live heap and not RSS. Same runs, two metrics,
+opposite rankings — RSS is a high-water mark, so it bills a loader for the
+intermediate structure it already freed.
+
 ## Results are only as honest as their caveats
 
 Cross-engine medians are computed **only over cells every compared engine ran
@@ -50,64 +81,52 @@ families, so a median over each engine's own cells silently rewards the ones
 that skip the hard cases. Measured effect of getting this wrong: pipeline 1.41×
 understated, executorch 1.82× overstated.
 
-### The ranking — 12 engines over the 12 cells all of them verify
+<!-- RESULTS:BEGIN -->
 
-llama-3 × {arabic, chinese, code, english, greek, hindi, thai} and
-mistral-nemo × {chinese, code, english, greek, korean}. Single thread, median
-of 5, warm, `add_special_tokens = false`, Apple M-series.
+### The ranking — 10 engines over the 23 cells all of them verify
 
-| engine | median MB/s | × ref | min | max |
-|---|---:|---:|---:|---:|
-| pipeline ([#2279](https://github.com/huggingface/tokenizers/pull/2279)) | **755.9** | 62.8× | 322 | 1175 |
-| gigatoken | 605.6 | 48.9× | 334 | 1290 |
-| wordchipper | 104.7 | 6.4× | 11 | 212 |
-| iree | 77.4 | 7.0× | 34 | 104 |
-| fastokens | 68.1 | 6.0× | 45 | 77 |
-| ai-tokenizer (JS) | 59.1 | 4.4× | 36 | 105 |
-| tokie | 36.8 | 2.9× | 15 | 121 |
-| tiktoken | 33.6 | 2.7× | 20 | 43 |
-| kitoken | 31.7 | 2.6× | 18 | 40 |
-| tokenizers 0.23.1 (reference) | 12.4 | 1.0× | 6 | 23 |
-| llamacpp | 6.4 | 0.4× | 2 | 18 |
-| executorch | 2.1 | 0.2× | 2 | 4 |
+Cells: **llama-3** × {added-normalized-dense, added-special-dense, amharic, bengali, chinese, dense, english, greek, hebrew, hindi, tamil}; **mistral-nemo** × {added-normalized-dense, added-special-dense, chat-chatml, chat-deepseek, chat-llama3, chinese, code, dense, georgian, greek, hebrew, japanese}.
+Single thread, median of 5 timed passes over disjoint slices, warm, `add_special_tokens = false`, Apple M-series.
 
-`pipeline` is exempt from the verification gate for now, by request: it is an
-in-progress PR and all 8 of its mismatches are albert (Unigram). The exemption
-suppresses only the exclusion — its mismatch count is still reported in the
-coverage table below, and its mismatched cells are still drawn as mismatched.
-On this data it changes no ranking, because those cells fall outside the common
-set regardless.
-
-minbpe and mistral-common are excluded from this table: each supports only one
-model, and including them would collapse the common set to zero cells. Their
-own-cells figures are below.
+<table>
+<thead><tr><th align="left">engine</th><th align="right">median MB/s</th><th align="right">× ref</th><th align="right">min</th><th align="right">max</th></tr></thead>
+<tbody>
+<tr><td align="left">gigatoken</td><td align="right"><b>238.6</b></td><td align="right">28.0×</td><td align="right">31</td><td align="right">1109</td></tr>
+<tr><td align="left">pipeline <a href="https://github.com/huggingface/tokenizers/pull/2279">#2279</a> + <a href="https://github.com/huggingface/tokenizers/pull/2296">#2296</a></td><td align="right">170.1</td><td align="right">20.0×</td><td align="right">47</td><td align="right">1051</td></tr>
+<tr><td align="left">fastokens</td><td align="right">53.4</td><td align="right">6.3×</td><td align="right">43</td><td align="right">75</td></tr>
+<tr><td align="left">ai-tokenizer <sub>JS</sub></td><td align="right">39.4</td><td align="right">4.6×</td><td align="right">21</td><td align="right">228</td></tr>
+<tr><td align="left">wordchipper</td><td align="right">30.8</td><td align="right">3.6×</td><td align="right">9</td><td align="right">131</td></tr>
+<tr><td align="left">tiktoken</td><td align="right">27.2</td><td align="right">3.2×</td><td align="right">16</td><td align="right">41</td></tr>
+<tr><td align="left">tokie</td><td align="right">26.9</td><td align="right">3.2×</td><td align="right">8</td><td align="right">92</td></tr>
+<tr><td align="left">kitoken</td><td align="right">26.3</td><td align="right">3.1×</td><td align="right">16</td><td align="right">37</td></tr>
+<tr><td align="left">tokenizers 0.23.1 <sub>reference</sub></td><td align="right">8.5</td><td align="right">1.0×</td><td align="right">5</td><td align="right">22</td></tr>
+<tr><td align="left">llamacpp</td><td align="right">3.2</td><td align="right">0.4×</td><td align="right">2</td><td align="right">16</td></tr>
+</tbody></table>
 
 ### Coverage — what each engine can actually do
 
-This is the other half of the picture, and the two must be read together: an
-engine high in the table above may be there partly because it declines the
-hard cells.
+The other half of the picture, and the two must be read together: an engine high in the table above may be there partly because it declines the hard cells. **own-cells median is not cross-comparable** — it is each engine measured on whatever subset it supports.
 
-| engine | cells run | ids match | ids differ | unsupported | own-cells median | RSS | package |
-|---|---:|---:|---:|---:|---:|---:|---:|
-| kitoken | 70 | **70** | 0 | 0 | 29.6 | 23 MB | **63 kB** |
-| tokenizers 0.23.1 (ref) | 70 | — | — | 0 | 12.2 | 40 MB | 192 kB |
-| pipeline | 70 | 62 | 8 | 0 | 535.1 | 63 MB | — |
-| tokie | 70 | 52 | 18 | 0 | 44.6 | 44 MB | 181 kB |
-| iree | 70 | 37 | 33 | 0 | 72.2 | 15 MB | — |
-| llamacpp | 60 | 47 | 13 | 10 | 6.6 | 31 MB | 215 kB |
-| gigatoken | 50 | 50 | 0 | 20 | 605.6 | 89 MB | 5230 kB |
-| fastokens | 40 | 40 | 0 | 30 | 67.9 | 153 MB | 690 kB |
-| executorch | 40 | 40 | 0 | 30 | 3.9 | 47 MB | 1532 kB |
-| tiktoken | 30 | 30 | 0 | 40 | 31.9 | 34 MB | 3699 kB |
-| ai-tokenizer | 30 | 30 | 0 | 40 | 59.5 | — | 31133 kB |
-| wordchipper | 30 | 29 | 1 | 40 | 78.1 | 105 MB | 259 kB |
-| mistral-common | 10 | 10 | 0 | 60 | 13.6 | — | 6400 kB |
-| minbpe | 10 | 10 | 0 | 60 | 1.0 | — | — |
-| blingfire | 10 | 0 | **10** | 60 | 7.8 | 2 MB | 3 kB |
+<table>
+<thead><tr><th align="left">engine</th><th align="right">cells</th><th align="right">ids match</th><th align="right">ids differ</th><th align="right">unsupported</th><th align="right">own-cells median</th><th align="right">RAM</th><th align="right">package</th></tr></thead>
+<tbody>
+<tr><td align="left">tokenizers 0.23.1 <sub>reference</sub></td><td align="right">203</td><td align="right">—</td><td align="right">—</td><td align="right">7</td><td align="right">8.2</td><td align="right">24 MB</td><td align="right">192 kB</td></tr>
+<tr><td align="left">kitoken</td><td align="right">203</td><td align="right">193</td><td align="right"><b>10</b></td><td align="right">7</td><td align="right">24.9</td><td align="right">11 MB</td><td align="right">63 kB</td></tr>
+<tr><td align="left">pipeline <a href="https://github.com/huggingface/tokenizers/pull/2279">#2279</a> + <a href="https://github.com/huggingface/tokenizers/pull/2296">#2296</a></td><td align="right">203</td><td align="right">174</td><td align="right"><b>29</b></td><td align="right">7</td><td align="right">115.8</td><td align="right">10 MB</td><td align="right">—</td></tr>
+<tr><td align="left">gigatoken</td><td align="right">145</td><td align="right"><b>145</b></td><td align="right">0</td><td align="right">65</td><td align="right">157.8</td><td align="right">68 MB</td><td align="right">5230 kB</td></tr>
+<tr><td align="left">fastokens</td><td align="right">116</td><td align="right">109</td><td align="right"><b>7</b></td><td align="right">94</td><td align="right">48.3</td><td align="right">61 MB</td><td align="right">690 kB</td></tr>
+<tr><td align="left">tokie</td><td align="right">203</td><td align="right">106</td><td align="right"><b>97</b></td><td align="right">7</td><td align="right">54.0</td><td align="right">11 MB</td><td align="right">181 kB</td></tr>
+<tr><td align="left">llamacpp</td><td align="right">174</td><td align="right">87</td><td align="right"><b>87</b></td><td align="right">36</td><td align="right">5.7</td><td align="right">19 MB</td><td align="right">215 kB</td></tr>
+<tr><td align="left">ai-tokenizer <sub>JS</sub></td><td align="right">90</td><td align="right">84</td><td align="right"><b>3</b></td><td align="right">120</td><td align="right">36.9</td><td align="right">—</td><td align="right">31133 kB</td></tr>
+<tr><td align="left">tiktoken</td><td align="right">87</td><td align="right">84</td><td align="right"><b>3</b></td><td align="right">123</td><td align="right">25.1</td><td align="right">26 MB</td><td align="right">3699 kB</td></tr>
+<tr><td align="left">wordchipper</td><td align="right">87</td><td align="right">76</td><td align="right"><b>11</b></td><td align="right">123</td><td align="right">49.3</td><td align="right">36 MB</td><td align="right">259 kB</td></tr>
+<tr><td align="left">minbpe</td><td align="right">30</td><td align="right">27</td><td align="right"><b>2</b></td><td align="right">180</td><td align="right">1.0</td><td align="right">—</td><td align="right">—</td></tr>
+<tr><td align="left">blingfire</td><td align="right">29</td><td align="right">0</td><td align="right"><b>29</b></td><td align="right">181</td><td align="right">8.1</td><td align="right">1 MB</td><td align="right">3 kB</td></tr>
+</tbody></table>
 
-**own-cells median is NOT cross-comparable** — it is each engine measured on
-whatever subset it supports. Use the ranking table for comparisons.
+<sub>RAM is live heap held by the loaded tokenizer, not RSS — RSS is a high-water mark that never falls, so it bills a loader for the intermediate it already freed. See <code>core/src/mem.rs</code>.</sub>
+
+<!-- RESULTS:END -->
 
 **kitoken is the only engine besides the reference that runs all 70 cells with
 correct ids**, covering BPE, Unigram and WordPiece, at 2.6× the reference with

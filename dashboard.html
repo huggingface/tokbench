@@ -272,8 +272,14 @@ function lineByCorpus(el, model, metric, compact){
       }).join("");
       return `<b>${esc(model)} / ${esc(c)}</b><br>${body}`;
     }},
+    // With ~30 corpora a compact panel cannot show every label legibly, so
+    // thin them to at most ~8 and let the tooltip carry the exact corpus. The
+    // full-size chart keeps all of them, rotated.
     xAxis:{type:"category",data:cols,boundaryGap:false,...AXIS,
-      axisLabel:{...AXIS.axisLabel,rotate:cols.length>7?30:0,fontSize:compact?9:11}},
+      axisLabel:{...AXIS.axisLabel,rotate:cols.length>7?(compact?45:30):0,
+        fontSize:compact?9:11,
+        interval:compact?Math.max(0,Math.ceil(cols.length/8)-1):(cols.length>16?1:0),
+        formatter:(v)=>compact&&v.length>10?v.slice(0,9)+"…":v}},
     yAxis:{type:metric.log?"log":"value",name:compact?"":metric.label,
       nameTextStyle:{color:"#8b95a7"},...AXIS,
       axisLabel:{...AXIS.axisLabel,fontSize:compact?9:11,formatter:(v)=>fmt.count(v)}},
@@ -586,12 +592,7 @@ function render(){
       <p class="hint">Click any column header to sort. Speedup is the median over verified cells only; a mismatched cell contributes nothing.</p>
       <div class="tablewrap" id="tbl-summary"></div>
     </div>
-
-    <div class="panel">
-      <h2>Every cell — ${X.models.length} models × ${X.corpora.length} languages × ${X.engines.length} engines</h2>
-      <p class="hint">The full matrix, one row per cell, including the ones that could not run. Click any header to sort.</p>
-      <div class="tablewrap" id="tbl-matrix"></div>
-    </div>`;
+`;
 
   buildTables(metric);
   lineByCorpus($("#c-lang"), S.model, metric, false);
@@ -771,31 +772,37 @@ function drawCell(){
   for(const r2 of X.cell.values()){
     if(r2.unsupported) continue;
     const k=r2.tokenizer_name;
-    if(!seen.has(k)||(seen.get(k).rss_delta_mb==null&&r2.rss_delta_mb!=null)) seen.set(k,r2);
+    if(!seen.has(k)||(seen.get(k).heap_load_mb==null&&r2.heap_load_mb!=null)) seen.set(k,r2);
   }
-  const f=[...seen.values()].filter(x=>x.crate_size_kb!=null||x.rss_delta_mb!=null)
+  const f=[...seen.values()].filter(x=>x.crate_size_kb!=null||x.heap_load_mb!=null||x.rss_delta_mb!=null)
     .sort((a,b)=>(b.crate_size_kb||0)-(a.crate_size_kb||0));
   if(!f.length) $("#c-foot").innerHTML='<div class="empty">No footprint data.<br><span style="font-size:12px">Run <code>scripts/package_size.py</code>, and the driver without <code>--no-memory</code>.</span></div>';
   else mk($("#c-foot"),{
     grid:{left:8,right:22,top:40,bottom:8,containLabel:true},
-    legend:{data:["Package size","Resident memory"],textStyle:{color:"#8b95a7"},top:0,itemWidth:12,itemHeight:12},
+    legend:{data:["Package size","Loaded tokenizer"],textStyle:{color:"#8b95a7"},top:0,itemWidth:12,itemHeight:12},
     tooltip:{...TOOLTIP,trigger:"axis",axisPointer:{type:"shadow"},formatter(ps){
       const x=f[ps[0].dataIndex];
+      // RSS is shown as a secondary line, never as the headline. It is a
+      // high-water mark: an engine that parses into hash maps, builds a compact
+      // structure and frees the maps keeps those pages, so RSS bills it for
+      // memory it no longer holds -- exactly inverting what a compact design buys.
+      const built=(x.rss_delta_mb!=null&&x.heap_encode_mb!=null)?x.rss_delta_mb-x.heap_encode_mb:null;
       return `<b>${esc(x.tokenizer_name)}</b><br>package: <b>${fmt.kb(x.crate_size_kb)}</b>
         <span style="color:#5b6577">${esc(x.package_ref||"")}</span><br>
-        resident: <b>${fmt.mb(x.rss_delta_mb)}</b>
-        ${x.rss_peak_mb!=null?`<div style="color:#8b95a7">peak RSS ${fmt.mb(x.rss_peak_mb)}</div>`:""}
+        loaded tokenizer: <b>${fmt.mb(x.heap_load_mb)}</b> live heap
+        ${x.heap_encode_mb!=null?`<div style="color:#8b95a7">+${fmt.mb(x.heap_encode_mb-x.heap_load_mb)} of caches once warm</div>`:""}
+        ${x.rss_delta_mb!=null?`<div style="color:#8b95a7">RSS ${fmt.mb(x.rss_delta_mb)}${built!=null?` — of which ${fmt.mb(built)} is freed during build but stays resident`:""}</div>`:""}
         ${x.binary_delta_kb!=null?`<div style="color:#8b95a7">adds ${fmt.kb(x.binary_delta_kb)} to a binary (gzipped)</div>`:""}`;
     }},
     xAxis:[{type:"value",name:"package kB",nameTextStyle:{color:"#8b95a7"},...AXIS,
         axisLabel:{...AXIS.axisLabel,formatter:(v)=>fmt.count(v)}},
-      {type:"value",name:"RSS MB",nameTextStyle:{color:"#8b95a7"},...AXIS,splitLine:{show:false}}],
+      {type:"value",name:"live heap MB",nameTextStyle:{color:"#8b95a7"},...AXIS,splitLine:{show:false}}],
     yAxis:{type:"category",data:f.map(x=>x.tokenizer_name),...AXIS,splitLine:{show:false}},
     series:[
       {name:"Package size",type:"bar",xAxisIndex:0,barMaxWidth:15,itemStyle:{color:"#c77dff",borderRadius:[0,3,3,0]},
         data:f.map(x=>x.crate_size_kb??0)},
-      {name:"Resident memory",type:"bar",xAxisIndex:1,barMaxWidth:15,itemStyle:{color:"#ff7ab6",borderRadius:[0,3,3,0]},
-        data:f.map(x=>x.rss_delta_mb??0)},
+      {name:"Loaded tokenizer",type:"bar",xAxisIndex:1,barMaxWidth:15,itemStyle:{color:"#ff7ab6",borderRadius:[0,3,3,0]},
+        data:f.map(x=>x.heap_load_mb??0)},
     ],
   });
 }
@@ -863,7 +870,8 @@ function buildTables(metric){
       if(!inScope(m,c)) continue;
       cells.push(r.mbps);
       if(r.verified===true) ok++; else if(r.verified===false) bad++;
-      if(r.rss_delta_mb!=null) rss.push(r.rss_delta_mb);
+      // Live heap, not RSS: see the footprint tooltip for why RSS inverts the ranking.
+      if(r.heap_load_mb!=null) rss.push(r.heap_load_mb); else if(r.rss_delta_mb!=null) rss.push(r.rss_delta_mb);
       if(pkg==null&&r.crate_size_kb!=null) pkg=r.crate_size_kb;
       if(bin==null&&r.binary_delta_kb!=null) bin=r.binary_delta_kb;
       cls=cls||r.engine_class; lang=lang||r.engine_lang; ver=ver||r.engine_version;
@@ -888,49 +896,13 @@ function buildTables(metric){
     {key:"med",label:"Median MB/s",cell:r=>num(r.med,fmt.mbps)},
     {key:"max",label:"Max MB/s",cell:r=>num(r.max,fmt.mbps)},
     {key:"speedup",label:"× vs ref",cell:r=>num(r.speedup,v=>v>=100?v.toFixed(0)+"×":v.toFixed(1)+"×")},
-    {key:"rss",label:"RSS",cell:r=>num(r.rss,fmt.mb)},
+    {key:"rss",label:"RAM",cell:r=>num(r.rss,fmt.mb)},
     {key:"pkg",label:"Package",cell:r=>num(r.pkg,fmt.kb)},
     {key:"bin",label:"+binary gz",cell:r=>num(r.bin,fmt.kb)},
     {key:"cls",label:"Class",cell:r=>`<td><span class="badge ${r.cls==="native"?"b-ok":r.cls==="subprocess"?"b-warn":"b-dim"}">${esc(r.cls||"?")}</span></td>`},
   ]};
 
-  // --- every cell ---
-  const matrix=[];
-  for(const m of X.models) for(const c of X.corpora) for(const e of X.engines){
-    const r=X.get(m,c,e); if(!r) continue;
-    const b=ref(m,c);
-    matrix.push({model:m, corpus:c, engine:e,
-      mbps:r.unsupported?null:r.mbps,
-      nsb:r.unsupported?null:r.ns_per_byte,
-      tokps:r.unsupported?null:r.total_tokens_produced/r.mean_execution_time_seconds,
-      tokens:r.unsupported?null:r.total_tokens_produced,
-      speedup:(!r.unsupported&&b)?r.mbps/b:null,
-      load:r.unsupported?null:r.load_ms,
-      rss:r.rss_delta_mb??null,
-      verified:r.unsupported?null:r.verified,
-      // Sortable as a string so "unsupported" rows group together.
-      status:r.unsupported?"unsupported":(r.verified===false?"differ":r.verified===true?"match":"unverified"),
-      why:r.unsupported||""});
-  }
-  TABLES.matrix={rows:matrix, cols:[
-    {key:"engine",label:"Engine",cell:r=>`<td><b>${esc(r.engine)}</b>${
-      r.why?`<div style="color:var(--dim);font-size:11px;white-space:normal;max-width:380px">${esc(r.why)}</div>`:""}</td>`},
-    {key:"model",label:"Model",cell:r=>`<td style="text-align:right">${esc(r.model)}</td>`},
-    {key:"corpus",label:"Language",cell:r=>`<td style="text-align:right">${esc(r.corpus)}</td>`},
-    {key:"mbps",label:"MB/s",cell:r=>num(r.mbps,fmt.mbps)},
-    {key:"speedup",label:"× vs ref",cell:r=>num(r.speedup,v=>v>=100?v.toFixed(0)+"×":v.toFixed(1)+"×")},
-    {key:"nsb",label:"ns/B",cell:r=>num(r.nsb,v=>v.toFixed(2))},
-    {key:"tokps",label:"tok/s",cell:r=>num(r.tokps,fmt.count)},
-    {key:"tokens",label:"Tokens",cell:r=>num(r.tokens,fmt.count)},
-    {key:"load",label:"Load ms",cell:r=>num(r.load,v=>v.toFixed(0))},
-    {key:"rss",label:"RSS",cell:r=>num(r.rss,fmt.mb)},
-    {key:"status",label:"IDs",cell:r=>r.status==="unsupported"
-      ?'<td><span class="badge b-dim">unsupported</span></td>'
-      :`<td>${idBadge(r.verified)}</td>`},
-  ]};
-
   paintTable("summary");
-  paintTable("matrix");
 }
 
 function wire(){
