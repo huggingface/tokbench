@@ -137,64 +137,65 @@ impl Engine for Adapter {
     /// phases after it. The totals are honest; the attribution is a difference
     /// of totals.
     ///
-    /// ## Two artefacts this has to avoid, both found by getting them wrong
+    /// ## The cache has to be dropped between reps
     ///
-    /// **The word cache makes rung order matter.** Run the ladder cold and in
-    /// order and `STAGE_MODEL` fills the `WordCache`, so `STAGE_POSTPROCESS`
-    /// -- timed next, on the same text -- reads almost free. Measured that way
-    /// post-processing came out at 0.1% of gpt2/english against the reference
-    /// engine's 9.6%, which is an artefact of the ladder, not a property of the
-    /// pipeline. So a full encode runs first and is discarded: every rung then
-    /// sees the same warm cache, which is also the state the headline number is
-    /// measured in.
+    /// The `WordCache` lives in the caller-owned `BpeScratch`, so it survives
+    /// an encode call -- which is the point of it, and right for the headline
+    /// number, where every timed pass sees a slice of text the instance has not
+    /// seen before. Here it is poison: this re-encodes *the same chunk* once
+    /// per rep, so with the cache kept, rep 2 onward times a hash lookup rather
+    /// than a merge. Both ways that went wrong before it was fixed:
     ///
-    /// **Minimum-of-N is the wrong statistic here.** Repeating a rung on one
-    /// chunk replays it against a cache that only gets warmer, so the minimum
-    /// converges on a best case the real encode never sees -- it reported 1.09
-    /// ms for a corpus that takes ~7 ms to encode. The median of a few reps
-    /// tracks the steady state instead.
+    /// * Minimum of 9 reps reported **1.09 ms** for a corpus that takes ~7 ms
+    ///   to encode -- the minimum was just the most-memoised pass.
+    /// * Run in ladder order, `STAGE_MODEL` filled the cache and
+    ///   `STAGE_POSTPROCESS`, timed next on the same text, came out at **0.1%**
+    ///   of gpt2/english against the reference engine's 9.6%.
     ///
-    /// Differences can still come out slightly negative on a cheap stage
-    /// swamped by noise; those clamp to zero rather than report negative time.
+    /// So every rep gets a fresh scratch, allocated outside the clock. Each
+    /// rung is measured from a cold cache, which also kills the ladder-order
+    /// effect: no rung can warm the one after it.
     ///
-    /// ## What the totals here are, and are not
+    /// ## What a cold rep costs, and why it is still the right choice
     ///
-    /// Warming each chunk before timing it buys clean attribution at a price:
-    /// these totals are the **fully warm** cost, and the headline number is not.
-    /// The harness times disjoint slices, so a timed pass meets words this
-    /// instance has often not seen; here every word is already in the
-    /// `WordCache`. On gpt2/english that is ~1.2 ms against ~6.8 ms of real
-    /// encode over the same chunks.
+    /// Dropping the cache is not free of consequence: it changes both the total
+    /// and the attribution, because a cold merge loop does work a warm one
+    /// skips. gpt2/english, same chunks, same code:
     ///
-    /// So read the **shares**, which is what the chart stacks. Do not read a
-    /// bar height here as this engine's encode time, and do not compare bar
-    /// heights against `hf-tokenizers`, whose breakdown is instrumented and
-    /// cold. Comparing the two engines' *proportions* is fine and is the point.
+    /// ```text
+    ///           total     normalize   pre-tokenize   model   post
+    /// warm      1.15 ms      0.0%         36.2%      63.8%   0.0%
+    /// cold      9.75 ms      0.0%          4.5%      95.5%   0.0%
+    /// ```
+    ///
+    /// The headline encode of those chunks is ~6.8 ms, between the two: the
+    /// harness reuses one instance across disjoint slices, so common words are
+    /// cached and rare ones are not. Neither ablation regime reproduces that,
+    /// and pretending otherwise would be the fabrication this module avoids.
+    ///
+    /// Cold is still right here for two reasons. It is the only regime that
+    /// does not hand the engine credit for having already seen the exact text
+    /// being timed. And `hf-tokenizers` keeps no such cache, so measuring cold
+    /// puts both engines' breakdowns in the same regime -- which is what makes
+    /// comparing their *proportions* legitimate.
+    ///
+    /// The attribution is still a difference of totals, so a phase's bucket
+    /// absorbs any effect it has on the phases after it.
     ///
     /// Only ever called outside the timed loop.
     fn phases(&mut self, text: &str) -> Option<Phases> {
         const PHASE_REPS: usize = 5;
 
-        // Warm first, discard. Every rung below then starts from the same cache
-        // state, and it is the state the headline number is measured in.
-        self.toks.clear();
-        self.pipe
-            .encode_generic::<{ PipelineTokenizer::STAGE_POSTPROCESS }>(
-                text,
-                false,
-                &mut self.pre_tokens,
-                &mut self.scratch,
-                &mut self.toks,
-            )
-            .ok()?;
-
-        // One monomorphised rung, median of `PHASE_REPS`. A macro because
-        // `STAGE` is a const generic argument: a closure cannot be generic over
-        // it, so each rung has to be spelled out as its own call.
+        // One monomorphised rung, median of `PHASE_REPS` cold reps. A macro
+        // because `STAGE` is a const generic argument: a closure cannot be
+        // generic over it, so each rung is spelled out as its own call.
         macro_rules! rung {
             ($stage:expr) => {{
                 let mut runs = [0u64; PHASE_REPS];
                 for slot in runs.iter_mut() {
+                    // A fresh scratch is a fresh `WordCache`. Allocated before
+                    // the clock starts, so it is not charged to the rung.
+                    self.scratch = self.pipe.get_model().init_scratch();
                     self.toks.clear();
                     let t = Instant::now();
                     let r = self.pipe.encode_generic::<{ $stage }>(

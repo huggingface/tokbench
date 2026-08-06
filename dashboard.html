@@ -583,7 +583,7 @@ function render(){
       </div>
       <div class="panel">
         <h2>Where the time goes — ${esc(S.model)} / ${esc(S.corpus)}</h2>
-        <p class="hint">Share of encode time per stage. Pre-tokenization is broken out because it is usually the bottleneck. <b>Two kinds of measurement.</b> <code>hf-tokenizers</code> clocks each component directly. <code>pipeline</code> subtracts successive monomorphised <code>STAGE</code> rungs, warm, so its bars are shares of its own cost, not times comparable to another engine's. Compare the proportions, not the heights.</p>
+        <p class="hint">Share of encode time per stage. Pre-tokenization is broken out because it is usually the bottleneck. <b>Two kinds of measurement.</b> <code>hf-tokenizers</code> clocks each component directly. <code>pipeline</code> subtracts successive monomorphised <code>STAGE</code> rungs. Both are measured with a cold cache -- every rep gets a fresh scratch -- so neither is credited for having already seen the text being timed, and the proportions are comparable. The totals are not the headline encode time: a cold merge loop does work the real run's warm cache skips.</p>
         <div id="c-phase" class="chart"></div>
       </div>
     </div>
