@@ -4,21 +4,26 @@ version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "tokbench engine: the HuggingFace target encode path (tokenizers PR #2279, tk-encode)."
+description = "tokbench engine: the HuggingFace target encode path (tokenizers PR #2308, tk-encode)."
 
 [dependencies]
 tokbench-core.workspace = true
 
-# PR #2279 — "poc(encode): target encode path — bitsplit + batched model +
-# fused cache probe". A BRANCH, not a tag, because the PR is open and still
-# moving. That is a deliberate trade-off: it tracks the work in progress, which
-# is the point of comparing against it, but it also means two runs a week apart
-# are not necessarily measuring the same code. Pin `rev = "..."` before quoting
-# any number from this engine anywhere durable.
+# PR #2308 — "perf(bpe): wire the word cache into the batched model path, fused",
+# which is #2306 (batched model) + the cache in `tokenize_spans` + the fused
+# `probe_emit`, on top of #2119 (`feat/train_encode_split`).
+#
+# A path dep on a local WORKTREE, not a tag: the PR is open and still moving.
+# That tracks the work in progress, which is the point, but it also means two
+# runs a week apart are not necessarily the same code. Check out an exact rev in
+# that worktree before quoting any number from this engine anywhere durable.
+#
+# The worktree lives under ~/Work, deliberately NOT under /tmp: a stale /tmp
+# checkout on some other branch is exactly how a previous run recorded numbers
+# for `perf/cache-probe-window` while the engine string still claimed #2279.
+# `Engine::info().version` below carries the branch and short rev; trust that
+# over any comment here, and re-check it whenever a number looks surprising.
 #
 # tk-encode is edition 2024, so this engine needs a recent toolchain; the rest
 # of the workspace does not.
-# PR #2241 (perf/bpe-merge) with the #2294 byte-gate fix stacked on top.
-# Pinned to an exact rev, not a branch: both PRs are open and moving, and a
-# moving baseline makes every recorded number unreproducible.
-tk-encode = { git = "https://github.com/huggingface/tokenizers", rev = "e35dc99c", package = "tk-encode" }
+tk-encode = { path = "/Users/arthurzucker/Work/tokenizers-2308/tokenizers/tk-encode", package = "tk-encode", features = ["fancy-regex"] }
