@@ -74,7 +74,8 @@ struct Args {
     #[arg(long, default_value = "python3")]
     python: String,
 
-    /// Skip the per-engine RSS child processes (they roughly double wall time,
+    /// Skip the per-engine footprint child processes (they roughly double wall
+    /// time,
     /// since each one reloads the model).
     #[arg(long)]
     no_memory: bool,
@@ -99,7 +100,7 @@ struct Args {
     #[arg(long, default_value = "package_sizes.json")]
     package_sizes: PathBuf,
 
-    // --- internal: the memory child. One engine per process; see core::rss. ---
+    // --- internal: the memory child. One engine per process; see core::mem. ---
     #[arg(long, hide = true)]
     memory: Option<String>,
     #[arg(long, hide = true)]
@@ -165,15 +166,17 @@ struct EngineResult {
     unsupported: Option<String>,
 
     // --- footprint ---
-    /// Resident memory this engine holds once loaded and warmed, measured in a
-    /// dedicated child process so one engine's pages cannot be credited to
-    /// another. See `tokbench_core::rss`.
+    /// Memory the *loaded* tokenizer holds, measured in a dedicated child
+    /// process so one engine's arenas cannot be credited to another.
+    ///
+    /// Live heap, not RSS: see `tokbench_core::mem` for why RSS ranked the
+    /// engine holding the least as the one holding the most.
     #[serde(skip_serializing_if = "Option::is_none")]
-    rss_delta_mb: Option<f64>,
-    /// Process high-water mark: catches engines that transiently allocate far
-    /// more than they retain. Linux only.
+    heap_load_mb: Option<f64>,
+    /// Live heap after a full encode pass — the loaded tokenizer plus whatever
+    /// caches it fills. The gap to `heap_load_mb` is the cache.
     #[serde(skip_serializing_if = "Option::is_none")]
-    rss_peak_mb: Option<f64>,
+    heap_encode_mb: Option<f64>,
     /// Published size of the engine's own package — the `.crate` tarball, the
     /// PyPI wheel, or the npm unpacked size. This is the dependency you take
     /// on. From `scripts/package_size.py`.
@@ -191,6 +194,12 @@ struct EngineResult {
     /// Multi-thread scaling curve, when the sweep ran for this cell.
     #[serde(skip_serializing_if = "Option::is_none")]
     scaling: Option<Vec<ScalePoint>>,
+
+    /// True when the corpus could not supply `reps + 1` disjoint slices, so
+    /// some text was encoded more than once inside the measurement. Such a
+    /// cell partly measures the engine's memoization; the dashboard flags it.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    reused_text: bool,
 }
 
 /// One point on an engine's scaling curve.
@@ -509,6 +518,7 @@ fn main() -> Result<()> {
                             verified: None,
                             unsupported: None,
                             scaling,
+                            reused_text: m.reused,
                             ..Default::default()
                         });
                     }
@@ -608,9 +618,9 @@ fn main() -> Result<()> {
         );
         for (i, (run, (model, corpus))) in runs.iter_mut().zip(&cell_inputs).enumerate() {
             for r in run.results.iter_mut().filter(|r| r.unsupported.is_none()) {
-                if let Some((delta, peak)) = measure_memory(&r.tokenizer_name, model, corpus) {
-                    r.rss_delta_mb = delta;
-                    r.rss_peak_mb = peak;
+                if let Some(m) = measure_memory(&r.tokenizer_name, model, corpus) {
+                    r.heap_load_mb = m.heap_load_mb;
+                    r.heap_encode_mb = m.heap_encode_mb;
                 }
             }
             if (i + 1) % 10 == 0 {
@@ -758,7 +768,7 @@ fn run_scripted(
 ///
 /// This must stay a separate process. Measuring several engines in one process
 /// lets the allocator hand engine B the pages engine A just freed, which
-/// reports B's footprint as near zero — see `tokbench_core::rss`.
+/// reports B's footprint as near zero — see `tokbench_core::mem`.
 fn memory_child(args: &Args, name: &str) -> Result<()> {
     let dir = args
         .memory_model
@@ -781,33 +791,51 @@ fn memory_child(args: &Args, name: &str) -> Result<()> {
     let text = tokbench_core::read_corpus(&corpus).context("reading corpus")?;
     let chunks = chunk(&text, CHUNK_BYTES, MAX_CHUNKS);
 
-    // Everything the engine retains — vocabulary, automata, and the caches the
-    // warm pass fills — is allocated inside this closure.
-    let (built, delta, peak) = tokbench_core::rss::around(|| {
-        let mut engine = ctor(&model).ok()?;
-        let mut out = Vec::new();
-        for c in &chunks {
-            out.clear();
-            engine.encode(c, &mut out);
-        }
-        // Keep the engine alive across the second RSS reading, or its pages
-        // would be freed before they are counted.
-        Some(engine)
-    });
-    if built.is_none() {
+    let base = tokbench_core::mem::live_heap();
+    let Some(mut engine) = ctor(&model).ok() else {
         println!("{{}}");
         return Ok(());
+    };
+    // Two samples, because "how much RAM does this engine use" is two questions:
+    // what the loaded tokenizer holds, and what it holds once its caches are
+    // warm. An engine can win one and lose the other.
+    let after_load = tokbench_core::mem::live_heap();
+    let mut out = Vec::new();
+    for c in &chunks {
+        out.clear();
+        engine.encode(c, &mut out);
     }
-    let mb = |b: Option<u64>| b.map(|b| b as f64 / (1024.0 * 1024.0));
+    // The corpus is resident before the baseline is taken and `out` holds only
+    // one chunk's ids, so neither is charged to the engine.
+    let after_encode = tokbench_core::mem::live_heap();
+    drop(out);
+
+    let grew = |a: Option<u64>| match (base, a) {
+        (Some(b), Some(a)) => Some(a.saturating_sub(b) as f64 / (1024.0 * 1024.0)),
+        _ => None,
+    };
     println!(
         "{}",
-        serde_json::json!({ "rss_delta_mb": mb(delta), "rss_peak_mb": mb(peak) })
+        serde_json::json!({
+            "heap_load_mb": grew(after_load),
+            "heap_encode_mb": grew(after_encode),
+        })
     );
+    // Held until after the readings: dropping earlier would free the very
+    // allocations being measured.
+    drop(engine);
     Ok(())
 }
 
+/// The four footprint numbers a child reports. See `memory_child`.
+#[derive(Default)]
+struct Footprint {
+    heap_load_mb: Option<f64>,
+    heap_encode_mb: Option<f64>,
+}
+
 /// Spawn `memory_child` for one engine and read back its footprint.
-fn measure_memory(name: &str, model: &Model, corpus: &Path) -> Option<(Option<f64>, Option<f64>)> {
+fn measure_memory(name: &str, model: &Model, corpus: &Path) -> Option<Footprint> {
     let exe = std::env::current_exe().ok()?;
     let out = Command::new(exe)
         .arg("--memory")
@@ -824,8 +852,9 @@ fn measure_memory(name: &str, model: &Model, corpus: &Path) -> Option<(Option<f6
         .rev()
         .find(|l| l.trim_start().starts_with('{'))?;
     let v: serde_json::Value = serde_json::from_str(line).ok()?;
-    Some((
-        v.get("rss_delta_mb").and_then(|x| x.as_f64()),
-        v.get("rss_peak_mb").and_then(|x| x.as_f64()),
-    ))
+    let f = |k: &str| v.get(k).and_then(|x| x.as_f64());
+    Some(Footprint {
+        heap_load_mb: f("heap_load_mb"),
+        heap_encode_mb: f("heap_encode_mb"),
+    })
 }
