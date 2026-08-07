@@ -22,7 +22,18 @@ HF_TEST_REPO := hf-internal-testing/tokenizers-test-data
 
 # One model per archetype: the shapes that stress different parts of a
 # tokenizer (regex-heavy byte-level BPE, normalizer-heavy WordPiece, Unigram).
-BENCH_MODELS := gpt2 llama-3 deepseek-v4 bert-base-uncased t5-base
+#
+# The test dataset keeps every config as one flat file at its root, under names
+# that do not all follow the same pattern, so each entry pairs the directory we
+# build under $(MODELS) with the file to fetch. These are the full
+# vocabularies, not the `-slim` files sitting beside them in the dataset: those
+# keep only a sample of the vocabulary, and scripts/make_artifacts.py refuses
+# them.
+BENCH_MODELS := gpt2:gpt2.json \
+                llama-3:llama-3-tokenizer.json \
+                deepseek-v4:deepseek-v4.json \
+                bert-base-uncased:bert-base-uncased.json \
+                t5-base:t5-base.json
 
 .PHONY: all
 all: fixtures models sizes bench
@@ -44,9 +55,6 @@ fixtures:
 	done
 	@echo "fixtures ready: $$(ls $(FIXTURES) | wc -l | tr -d ' ') corpora"
 
-# Fetch each model's tokenizer.json, then derive the per-engine artifacts from
-# it. Deriving rather than downloading separately is deliberate: every engine
-# must be measured on the SAME vocabulary, or the comparison is meaningless.
 # Large realistic fixtures: agent traces with tool calls, code, and mixed
 # scripts — rendered through each model's REAL Jinja chat_template, so the
 # bytes are what a served model actually tokenizes.
@@ -54,15 +62,19 @@ fixtures:
 bigfixtures:
 	$(PY) scripts/make_fixtures.py 4
 
+# Fetch each model's tokenizer.json, then derive the per-engine artifacts from
+# it. Deriving rather than downloading separately is deliberate: every engine
+# must be measured on the SAME vocabulary, or the comparison is meaningless.
 .PHONY: models
 models:
 	@mkdir -p $(MODELS)
-	@for m in $(BENCH_MODELS); do \
+	@for spec in $(BENCH_MODELS); do \
+	  m=$${spec%%:*}; f=$${spec#*:}; \
 	  [ -f $(MODELS)/$$m/tokenizer.json ] || { echo "fetch model $$m"; \
 	    mkdir -p $(MODELS)/$$m && \
-	    $(HF) download $(HF_TEST_REPO) models/$$m/tokenizer.json --repo-type dataset \
+	    $(HF) download $(HF_TEST_REPO) $$f --repo-type dataset \
 	      --local-dir $(DATA)/_dl >/dev/null && \
-	    cp $(DATA)/_dl/models/$$m/tokenizer.json $(MODELS)/$$m/ ; } ; \
+	    cp $(DATA)/_dl/$$f $(MODELS)/$$m/tokenizer.json ; } ; \
 	done
 	@$(PY) scripts/make_artifacts.py $(MODELS)
 
