@@ -404,3 +404,7 @@ either would mean parsing its output back into this schema. The measurement is
 
 Apache-2.0. Each engine remains under its own licence; this repository vendors
 none of them.
+
+## Contributors
+
+Initial development by @ArthurZucker, @SBrandeis, @McPatate, @LysandreJik
