@@ -23,6 +23,7 @@ open = "5"
 tokbench-hf-tokenizers = { path = "../engines/hf-tokenizers", optional = true }
 tokbench-pipeline = { path = "../engines/pipeline", optional = true }
 tokbench-kitoken = { path = "../engines/kitoken", optional = true }
+tokbench-splintr = { path = "../engines/splintr", optional = true }
 tokbench-fastokens = { path = "../engines/fastokens", optional = true }
 tokbench-tokie = { path = "../engines/tokie", optional = true }
 tokbench-tiktoken = { path = "../engines/tiktoken", optional = true }
@@ -47,6 +48,7 @@ default = ["hf-tokenizers"]
 hf-tokenizers = ["dep:tokbench-hf-tokenizers"]
 pipeline = ["dep:tokbench-pipeline"]
 kitoken = ["dep:tokbench-kitoken"]
+splintr = ["dep:tokbench-splintr"]
 fastokens = ["dep:tokbench-fastokens"]
 tokie = ["dep:tokbench-tokie"]
 tiktoken = ["dep:tokbench-tiktoken"]
@@ -65,6 +67,7 @@ rust-engines = [
     "hf-tokenizers",
     "pipeline",
     "kitoken",
+    "splintr",
     "fastokens",
     "tokie",
     "tiktoken",

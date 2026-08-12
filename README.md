@@ -44,7 +44,7 @@ The contract is written out in full at the top of [`core/src/lib.rs`](core/src/l
 
 ## The engines
 
-All sixteen are wired. Where an engine cannot run a cell it returns an explicit
+All seventeen are wired. Where an engine cannot run a cell it returns an explicit
 `Unsupported` with the reason, and where its ids disagree with the reference the
 cell is marked `differ` and excluded from every ranking.
 
@@ -53,6 +53,7 @@ cell is marked `differ` and excluded from every ranking.
 | [hf-tokenizers](engines/hf-tokenizers) | Rust | native | **wired** — reference + oracle, 4-phase instrumented |
 | [pipeline](engines/pipeline) | Rust | native | **wired** — the target encode path, [tokenizers#2279](https://github.com/huggingface/tokenizers/pull/2279) |
 | [kitoken](engines/kitoken) | Rust | native | **wired** — BPE + Unigram + WordPiece from one crate |
+| [splintr](engines/splintr) | Rust | native | **wired, verified** — BPE + Unigram + SentencePiece + WordPiece from `tokenizer.json` |
 | [tokie](engines/tokie) | Rust | native | **wired, verified** |
 | [tiktoken](engines/tiktoken) | Rust | native | **wired, verified** (needs derived `ranks.tiktoken`) |
 | [fastokens](engines/fastokens) | Rust | native | **wired** — rejects tokenizer.json without `model.type` |

@@ -684,6 +684,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "dynasm"
+version = "5.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fd358e74d2f8d71a11b7a2c51c67ad5df3de06003b0596875e47bc09126c894e"
+dependencies = [
+ "bitflags",
+ "byteorder",
+ "lazy_static",
+ "proc-macro-error3",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
+name = "dynasmrt"
+version = "5.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6efe03f6bd356ae85eeea7ee14c2bf54e664a949d089d238364b5a99afbc4116"
+dependencies = [
+ "byteorder",
+ "dynasm",
+ "fnv",
+ "memmap2",
+]
+
+[[package]]
 name = "either"
 version = "1.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -921,6 +948,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
 dependencies = [
  "allocator-api2",
+ "equivalent",
  "foldhash 0.2.0",
  "serde",
  "serde_core",
@@ -1421,6 +1449,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "lru"
+version = "0.18.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5d2f2f9b4ba7e6b24d95e7e899329d35be83bcded72c8540cdd5368932d1d90a"
+dependencies = [
+ "hashbrown 0.17.1",
+]
+
+[[package]]
 name = "macro_rules_attribute"
 version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1463,6 +1500,15 @@ name = "memchr"
 version = "2.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
+
+[[package]]
+name = "memmap2"
+version = "0.9.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d1219ed1b7f229ee7104d281dd01d6802fe28bb6e95d292942c4daacdeb798c0"
+dependencies = [
+ "libc",
+]
 
 [[package]]
 name = "miette"
@@ -1801,6 +1847,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "proc-macro-error-attr3"
+version = "3.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b0084e6206a967a2dad822180626b2f6b07a3b379325e8f1ec0438e33a469ba7"
+dependencies = [
+ "proc-macro2",
+ "quote",
+]
+
+[[package]]
+name = "proc-macro-error3"
+version = "3.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0cf066225f2373bc711684792b69bdeac0356019b007e721090c24d92d5d5a50"
+dependencies = [
+ "proc-macro-error-attr3",
+ "proc-macro2",
+ "quote",
+ "syn 3.0.3",
+]
+
+[[package]]
 name = "proc-macro2"
 version = "1.0.107"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2106,6 +2174,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
+name = "regexr"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "86a1349fbb85141d3c4fbb05249ae2060c4f79de1fa279ac81ee1cba645d47df"
+dependencies = [
+ "aho-corasick",
+ "dynasm",
+ "dynasmrt",
+ "memchr",
+]
+
+[[package]]
 name = "ringbuffer"
 version = "0.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2309,6 +2389,27 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3763264f6b73151db08c50ff20d7d8a0b8796e021cdea7ceedad07b80155fa0e"
 dependencies = [
  "lock_api",
+]
+
+[[package]]
+name = "splintr"
+version = "0.19.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c74ed537e3244281cbe2ae22fcd55e1d9968258ca24cbf6f302f0598ed1d97be"
+dependencies = [
+ "aho-corasick",
+ "base64 0.22.1",
+ "lru",
+ "memchr",
+ "rayon",
+ "regexr",
+ "rustc-hash",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.19",
+ "unicode-general-category",
+ "unicode-normalization",
+ "unicode-segmentation",
 ]
 
 [[package]]
@@ -2599,6 +2700,7 @@ dependencies = [
  "tokbench-pipeline",
  "tokbench-rust-gems-bpe",
  "tokbench-sentencepiece",
+ "tokbench-splintr",
  "tokbench-tiktoken",
  "tokbench-tokie",
  "tokbench-wordchipper",
@@ -2620,6 +2722,7 @@ dependencies = [
  "tokbench-pipeline",
  "tokbench-rust-gems-bpe",
  "tokbench-sentencepiece",
+ "tokbench-splintr",
  "tokbench-tiktoken",
  "tokbench-tokie",
  "tokbench-wordchipper",
@@ -2712,6 +2815,14 @@ name = "tokbench-sentencepiece"
 version = "0.1.0"
 dependencies = [
  "sentencepiece",
+ "tokbench-core",
+]
+
+[[package]]
+name = "tokbench-splintr"
+version = "0.1.0"
+dependencies = [
+ "splintr",
  "tokbench-core",
 ]
 
