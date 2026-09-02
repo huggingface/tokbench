@@ -30,7 +30,7 @@
 //! any gap between the two is offset bookkeeping rather than raw encode speed.
 //! The ids are identical either way, which is what `verified` checks.
 
-use tokbench_core::{Build, Class, Engine, Ids, Info, Model, Unsupported};
+use tokbench_core::{unsupported, Build, Class, Engine, Ids, Info, Model, Unsupported};
 
 pub struct Adapter {
     tok: tk_encode::Tokenizer,
@@ -65,6 +65,19 @@ impl Engine for Adapter {
     fn encode(&mut self, text: &str, out: &mut Ids) {
         if let Ok(enc) = self.tok.encode_fast(text, false) {
             out.extend_from_slice(enc.get_ids());
+        }
+    }
+
+    /// There is no `decode_fast` counterpart to `encode_fast`: the PR's work
+    /// is on the encode path, so decode goes through the ordinary entry point
+    /// and this number is expected to sit near the reference's.
+    fn decode(&mut self, ids: &[u32], out: &mut String) -> Result<(), Unsupported> {
+        match self.tok.decode(ids, false) {
+            Ok(s) => {
+                out.push_str(&s);
+                Ok(())
+            }
+            Err(e) => unsupported(format!("decode failed: {e}")),
         }
     }
 }

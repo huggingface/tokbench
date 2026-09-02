@@ -1,8 +1,10 @@
 //! The fairness contract every engine in `engines/` is measured through.
 //!
-//! There is exactly ONE timing loop (`measure`) and exactly ONE trait
-//! (`Engine`). An engine folder's only job is to turn a model directory into
-//! something that answers "give me the token ids for this `&str`". Everything
+//! There is exactly ONE timing loop per direction (`measure` for encode,
+//! `measure_decode` for decode) and exactly ONE trait (`Engine`). An engine
+//! folder's only job is to turn a model directory into something that answers
+//! "give me the token ids for this `&str`", and — where the library can —
+//! "give me the text for these ids". Everything
 //! else — warm-up, repetition count, which clock, how bytes are counted, how
 //! the median is taken — lives here, so no engine can be measured on terms of
 //! its own choosing.
@@ -37,6 +39,17 @@
 //!    attention masks on the same pass ([`Info::also_computes`]). That cost is
 //!    real and is left in the number, but the report prints the disclosure next
 //!    to it so a reader knows the comparison is not like-for-like.
+//! 7. **Decode gets the same ids, from the reference.** Decode throughput is
+//!    measured over the reference engine's id stream, never over each
+//!    engine's own encode output — otherwise an engine that merges harder
+//!    feeds itself fewer, longer tokens and posts a better token rate for
+//!    strictly less work. Correctness is checked the same way as encode, one
+//!    level along: the decoded *text* is hashed and compared against the
+//!    reference's decoded text. It cannot be compared against the original
+//!    corpus, because a lowercasing or accent-stripping normalizer makes
+//!    `decode(encode(t)) != t` for a perfectly correct tokenizer. Engines
+//!    whose library has no decode entry point report `unsupported` and are
+//!    absent from the decode ranking rather than scored zero in it.
 //!
 //! # What is deliberately NOT normalised
 //!
@@ -213,6 +226,24 @@ pub trait Engine: Send {
     fn phases(&mut self, _text: &str) -> Option<Phases> {
         None
     }
+
+    /// Decode `ids` back to text, appending to `out`.
+    ///
+    /// `out` arrives cleared with its capacity retained, mirroring
+    /// [`Engine::encode`]: adapters whose library returns an owned `String`
+    /// push from it, and that copy is timed on purpose.
+    ///
+    /// The ids handed in are always the REFERENCE engine's, never the
+    /// engine's own — see [`measure_decode`] for why that is the only fair
+    /// input.
+    ///
+    /// The default returns [`Unsupported`], so an engine has to opt in rather
+    /// than be silently credited with a decode it never ran. Returning `Err`
+    /// mid-run is also the correct move for an id this engine cannot map: a
+    /// short `out` would otherwise hash as a cheap, fast decode.
+    fn decode(&mut self, _ids: &[u32], _out: &mut String) -> Result<(), Unsupported> {
+        unsupported("library exposes no decode entry point")
+    }
 }
 
 /// Constructor half of an engine, kept separate from [`Engine`] so the driver
@@ -240,6 +271,22 @@ pub fn ids_hash(ids: &[u32]) -> u64 {
     h
 }
 
+/// A deterministic hash of decoded text — the decode-side counterpart to
+/// [`ids_hash`], and the same FNV-1a for the same reason.
+///
+/// Decode cannot be verified against the original corpus: a normalizer that
+/// lowercases or strips accents makes `decode(encode(t)) != t` for a correct
+/// tokenizer. So the oracle is the reference engine's decoded text, and this
+/// hashes it.
+pub fn text_hash(text: &str) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for &b in text.as_bytes() {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    h
+}
+
 /// One engine × one corpus.
 #[derive(Clone, Debug)]
 pub struct Measure {
@@ -250,6 +297,25 @@ pub struct Measure {
     pub bytes: usize,
     pub tokens: usize,
     pub ids_hash: u64,
+}
+
+/// One engine × one corpus, decode direction.
+#[derive(Clone, Debug)]
+pub struct DecodeMeasure {
+    /// MB/s of text produced. Deliberately the *output* rate, so it sits on
+    /// the same axis as encode's MB/s of text consumed.
+    pub mbps: f64,
+    /// The input-side rate. Decode is driven by token count, not byte count,
+    /// so this is the number to compare when two engines emit text of
+    /// different lengths from the same ids.
+    pub ns_per_token: f64,
+    /// Median over `reps` passes, seconds.
+    pub secs: f64,
+    /// Bytes of text produced from ONE slice.
+    pub bytes: usize,
+    /// Ids consumed from ONE slice.
+    pub tokens: usize,
+    pub text_hash: u64,
 }
 
 /// Split a corpus into fixed-size chunks on char boundaries.
@@ -337,6 +403,71 @@ pub fn measure(engine: &mut dyn Engine, chunks: &[String], reps: usize, warmup: 
     }
 }
 
+/// THE decode timing loop, and the only one. Same contract as [`measure`]:
+/// one clock, one median, load excluded, warm.
+///
+/// **Every engine is fed the same ids — the reference engine's.** This is the
+/// decode-side reading of fairness rule 1, and it is not optional. Letting
+/// each engine decode its *own* encode output would hand a different input to
+/// every engine: one that merges aggressively decodes fewer, longer tokens
+/// and would post a higher token rate for doing strictly less work. Same
+/// input, same work, then compare.
+///
+/// The untimed probe pass ahead of the timer does triple duty — it is the
+/// warm pass, it captures the text hash for verification, and it is where an
+/// engine without a decode entry point drops out before any number is
+/// attributed to it.
+pub fn measure_decode(
+    engine: &mut dyn Engine,
+    id_chunks: &[Ids],
+    reps: usize,
+) -> Result<DecodeMeasure, Unsupported> {
+    let tokens: usize = id_chunks.iter().map(|c| c.len()).sum();
+    if tokens == 0 {
+        return unsupported("no reference ids to decode");
+    }
+    // ~4 bytes/token is the loose upper bound for UTF-8 text; the exact
+    // capacity does not matter, only that the timed loop never grows it.
+    let mut out = String::with_capacity(tokens * 4);
+
+    let mut all = String::new();
+    for c in id_chunks {
+        out.clear();
+        engine.decode(c, &mut out)?;
+        all.push_str(&out);
+    }
+    let bytes = all.len();
+    let hash = text_hash(&all);
+    drop(all);
+    if bytes == 0 {
+        return unsupported("decode produced no text");
+    }
+
+    let mut samples = Vec::with_capacity(reps);
+    for _ in 0..reps {
+        let t0 = Instant::now();
+        for c in id_chunks {
+            out.clear();
+            // The probe pass above already proved this engine can decode
+            // these ids, so `?` here is a genuine mid-run failure.
+            engine.decode(c, &mut out)?;
+            // Keep the optimiser from deleting the call.
+            std::hint::black_box(&out);
+        }
+        samples.push(t0.elapsed().as_secs_f64());
+    }
+
+    let secs = median(samples);
+    Ok(DecodeMeasure {
+        mbps: (bytes as f64 / (1024.0 * 1024.0)) / secs,
+        ns_per_token: secs * 1e9 / tokens as f64,
+        secs,
+        bytes,
+        tokens,
+        text_hash: hash,
+    })
+}
+
 /// Read a corpus file, returning `None` rather than panicking so a missing
 /// fixture degrades to a skipped cell.
 pub fn read_corpus(path: &Path) -> Option<String> {
@@ -365,6 +496,28 @@ mod tests {
         fn encode(&mut self, text: &str, out: &mut Ids) {
             out.extend(text.as_bytes().iter().map(|&b| b as u32));
         }
+        fn decode(&mut self, ids: &[u32], out: &mut String) -> Result<(), Unsupported> {
+            let bytes: Vec<u8> = ids.iter().map(|&i| i as u8).collect();
+            match String::from_utf8(bytes) {
+                Ok(s) => {
+                    out.push_str(&s);
+                    Ok(())
+                }
+                Err(e) => unsupported(format!("not utf-8: {e}")),
+            }
+        }
+    }
+
+    /// An engine that only encodes. Proves the default `decode` keeps such an
+    /// engine out of the decode ranking instead of scoring it zero.
+    struct EncodeOnly;
+    impl Engine for EncodeOnly {
+        fn info(&self) -> Info {
+            Bytes.info()
+        }
+        fn encode(&mut self, text: &str, out: &mut Ids) {
+            Bytes.encode(text, out)
+        }
     }
 
     #[test]
@@ -388,6 +541,38 @@ mod tests {
         let again = measure(&mut Bytes, &chunks, 1, true);
         assert_eq!(m.ids_hash, again.ids_hash);
         assert_ne!(ids_hash(&[1, 2, 3]), ids_hash(&[3, 2, 1]));
+    }
+
+    #[test]
+    fn decode_harness_measures_and_verifies() {
+        let text = "hello world, ".repeat(500);
+        let chunks = chunk(&text, 1024, 100);
+
+        // Built the way the driver builds them: one id slice per text chunk,
+        // from the reference engine.
+        let id_chunks: Vec<Ids> = chunks
+            .iter()
+            .map(|c| {
+                let mut ids = Ids::new();
+                Bytes.encode(c, &mut ids);
+                ids
+            })
+            .collect();
+
+        let d = measure_decode(&mut Bytes, &id_chunks, 3).expect("Bytes decodes");
+        assert_eq!(d.bytes, text.len(), "round trip must reproduce every byte");
+        assert_eq!(d.tokens, text.len(), "one id per byte");
+        assert!(d.mbps > 0.0 && d.mbps.is_finite());
+        assert!(d.ns_per_token > 0.0 && d.ns_per_token.is_finite());
+        assert_eq!(d.text_hash, text_hash(&text), "hash of the decoded text");
+
+        // An engine with no decode entry point is excluded from the decode
+        // ranking, not scored zero in it.
+        assert!(measure_decode(&mut EncodeOnly, &id_chunks, 1).is_err());
+
+        // The hash has to discriminate, or verification is a no-op that
+        // passes everything.
+        assert_ne!(text_hash("abc"), text_hash("acb"));
     }
 
     /// Chunk boundaries must never split a multi-byte character, or engines

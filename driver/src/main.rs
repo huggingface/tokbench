@@ -24,7 +24,7 @@ use std::time::Instant;
 use anyhow::{bail, Context, Result};
 use clap::Parser;
 use serde::{Deserialize, Serialize};
-use tokbench_core::{chunk, measure, Model, Phases};
+use tokbench_core::{chunk, measure, measure_decode, Ids, Model, Phases};
 
 /// ~10 kB documents: large enough that per-call overhead is amortised, small
 /// enough to stay in cache. Matches the upstream pipeline benchmark so numbers
@@ -78,6 +78,11 @@ struct Args {
     /// since each one reloads the model).
     #[arg(long)]
     no_memory: bool,
+
+    /// Skip the decode pass. Decode is measured over the reference engine's
+    /// ids, so this also skips the extra reference encode that produces them.
+    #[arg(long)]
+    no_decode: bool,
 
     /// Per-engine stripped binary deltas, as written by `scripts/binsize.sh`.
     /// Merged into the report when present.
@@ -152,6 +157,28 @@ struct EngineResult {
     /// Set when the engine could not run this cell, with the reason.
     #[serde(skip_serializing_if = "Option::is_none")]
     unsupported: Option<String>,
+
+    // --- decode direction; all `None` under `--no-decode` ---
+    /// MB/s of text produced, decoding the REFERENCE engine's ids. Not the
+    /// engine's own ids: see fairness rule 7.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    decode_mbps: Option<f64>,
+    /// The input-side rate, and the one to compare when two engines produce
+    /// text of different lengths from the same ids.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    decode_ns_per_token: Option<f64>,
+    /// Hash of the decoded text, the decode-side counterpart of `ids_hash`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    decode_text_hash: Option<String>,
+    /// `true`/`false` against the reference engine's decoded text; `None`
+    /// when no reference decode ran, so nothing could be checked.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    decode_verified: Option<bool>,
+    /// Why this engine produced no decode number — usually that its library
+    /// has no decode entry point. Distinct from `unsupported`, which means it
+    /// could not encode the cell either.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    decode_unsupported: Option<String>,
 
     // --- footprint ---
     /// Resident memory this engine holds once loaded and warmed, measured in a
@@ -334,6 +361,35 @@ fn main() -> Result<()> {
 
             let mut results: Vec<EngineResult> = Vec::new();
 
+            // The one id stream every engine's decode is measured over
+            // (fairness rule 7). Built here, once per cell, from a throwaway
+            // reference engine: if each engine decoded its own encode output,
+            // an engine that merges harder would feed itself fewer and longer
+            // tokens and post a better token rate for strictly less work.
+            //
+            // Empty means no decode pass — either `--no-decode`, or this
+            // binary was compiled without the reference engine, in which case
+            // there is no oracle to verify a decode against anyway.
+            let ref_ids: Vec<Ids> = if args.no_decode {
+                Vec::new()
+            } else {
+                natives
+                    .iter()
+                    .find(|(n, _)| *n == registry::REFERENCE)
+                    .and_then(|(_, ctor)| ctor(&model).ok())
+                    .map(|mut r| {
+                        chunks
+                            .iter()
+                            .map(|c| {
+                                let mut ids = Ids::new();
+                                r.encode(c, &mut ids);
+                                ids
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            };
+
             // Native engines: built, then timed in-process by core::measure.
             for (name, ctor) in &natives {
                 if !want(name) {
@@ -380,13 +436,44 @@ fn main() -> Result<()> {
                             }
                         }
 
+                        // Decode, on the same clock, over the reference's ids.
+                        // Runs while this engine is still alive and warm, so
+                        // it costs no extra build.
+                        let decoded = (!ref_ids.is_empty())
+                            .then(|| measure_decode(engine.as_mut(), &ref_ids, args.reps));
+                        let (
+                            decode_mbps,
+                            decode_ns_per_token,
+                            decode_text_hash,
+                            decode_unsupported,
+                        ) = match &decoded {
+                            None => (None, None, None, None),
+                            Some(Ok(d)) => (
+                                Some(d.mbps),
+                                Some(d.ns_per_token),
+                                Some(format!("{:016x}", d.text_hash)),
+                                None,
+                            ),
+                            Some(Err(why)) => (None, None, None, Some(why.to_string())),
+                        };
+
+                        let decode_note = match &decoded {
+                            Some(Ok(d)) => format!("  dec {:>7.1} MB/s", d.mbps),
+                            // Distinguish "cannot decode" from "was not asked
+                            // to", so a silent regression cannot hide as a
+                            // blank column.
+                            Some(Err(_)) => "  dec    n/a".to_string(),
+                            None => String::new(),
+                        };
+
                         eprintln!(
-                            "  [{}/{}] {model_name}/{corpus_name} {name:<16} {:>8.1} MB/s  {:>6.2} ns/B  {} tok",
+                            "  [{}/{}] {model_name}/{corpus_name} {name:<16} {:>8.1} MB/s  {:>6.2} ns/B  {} tok{}",
                             done + 1,
                             cells,
                             m.mbps,
                             m.ns_per_byte,
-                            m.tokens
+                            m.tokens,
+                            decode_note
                         );
 
                         results.push(EngineResult {
@@ -410,6 +497,11 @@ fn main() -> Result<()> {
                             ids_hash: format!("{:016x}", m.ids_hash),
                             verified: None,
                             unsupported: None,
+                            decode_mbps,
+                            decode_ns_per_token,
+                            decode_text_hash,
+                            decode_verified: None,
+                            decode_unsupported,
                             ..Default::default()
                         });
                     }
@@ -462,6 +554,32 @@ fn main() -> Result<()> {
                 if !bad.is_empty() {
                     eprintln!(
                         "  ! {model_name}/{corpus_name}: ids differ from {}: {}",
+                        registry::REFERENCE,
+                        bad.join(", ")
+                    );
+                }
+            }
+
+            // Same oracle, one level along: the reference's decoded text. Not
+            // the original corpus — a lowercasing or accent-stripping
+            // normalizer makes `decode(encode(t)) != t` for a tokenizer that
+            // is behaving perfectly, so the corpus cannot be the expectation.
+            if let Some(ref_text) = results
+                .iter()
+                .find(|r| r.tokenizer_name == registry::REFERENCE)
+                .and_then(|r| r.decode_text_hash.clone())
+            {
+                for r in results.iter_mut().filter(|r| r.decode_text_hash.is_some()) {
+                    r.decode_verified = Some(r.decode_text_hash.as_deref() == Some(&ref_text));
+                }
+                let bad: Vec<&str> = results
+                    .iter()
+                    .filter(|r| r.decode_verified == Some(false))
+                    .map(|r| r.tokenizer_name.as_str())
+                    .collect();
+                if !bad.is_empty() {
+                    eprintln!(
+                        "  ! {model_name}/{corpus_name}: decoded text differs from {}: {}",
                         registry::REFERENCE,
                         bad.join(", ")
                     );

@@ -19,7 +19,7 @@
 
 use std::time::Instant;
 
-use tokbench_core::{Build, Class, Engine, Ids, Info, Model, Phases, Unsupported};
+use tokbench_core::{unsupported, Build, Class, Engine, Ids, Info, Model, Phases, Unsupported};
 use tokenizers::tokenizer::{Model as _, Normalizer as _, PostProcessor as _, PreTokenizer as _};
 use tokenizers::{NormalizedString, OffsetType, PreTokenizedString, Tokenizer};
 
@@ -60,6 +60,22 @@ impl Engine for Adapter {
         // short changes the id hash, so verification flags it.
         if let Ok(enc) = self.tok.encode(text, false) {
             out.extend_from_slice(enc.get_ids());
+        }
+    }
+
+    /// `skip_special_tokens = false` to match `encode`'s
+    /// `add_special_tokens = false`: neither direction adds or removes
+    /// anything the other did not.
+    ///
+    /// This is the decode oracle — every other engine's decoded text is
+    /// compared against this one's.
+    fn decode(&mut self, ids: &[u32], out: &mut String) -> Result<(), Unsupported> {
+        match self.tok.decode(ids, false) {
+            Ok(s) => {
+                out.push_str(&s);
+                Ok(())
+            }
+            Err(e) => unsupported(format!("decode failed: {e}")),
         }
     }
 

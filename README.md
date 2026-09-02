@@ -39,8 +39,33 @@ tokbench fixes the measurement, not the result:
    a whole-machine number is never printed next to a single-core one unlabelled.
 6. **Disclose the extra work.** An engine that also computes byte offsets keeps
    that cost in its number, and the report says so next to it.
+7. **Decode gets the same ids, from the reference.** Decode is timed over the
+   *reference's* id stream, never over each engine's own encode output —
+   otherwise an engine that merges harder feeds itself fewer, longer tokens and
+   posts a better token rate for strictly less work. The decoded text is hashed
+   and compared against the reference's decoded text, not against the original
+   corpus: a lowercasing or accent-stripping normalizer makes
+   `decode(encode(t)) != t` for a tokenizer that is behaving correctly.
 
 The contract is written out in full at the top of [`core/src/lib.rs`](core/src/lib.rs).
+
+## Decode
+
+Both directions are measured in the same run. Decode reports two rates, because
+one number cannot answer both questions:
+
+- `decode_mbps` — MB/s of text produced. Same axis as encode's MB/s, so the two
+  columns can sit next to each other.
+- `decode_ns_per_token` — the input-side cost. This is the one to compare when
+  two engines emit text of different lengths from the same ids.
+
+An engine whose library has no decode entry point reports `decode_unsupported`
+and is **absent from the decode ranking rather than scored zero in it** — the
+same treatment `unsupported` gets on the encode side. Wiring one is a single
+`fn decode` on its adapter; the default implementation is what declines.
+
+`--no-decode` skips the pass, along with the extra reference encode that
+produces the shared ids.
 
 ## Results are only as honest as their caveats
 
@@ -90,7 +115,7 @@ open dashboard.html           # drop tokenizer_bench_results.json onto it
 
 Useful flags: `--engine <name>` (repeatable), `--model <name>`, `--reps N`,
 `--no-warmup`, `--no-memory` (skips the per-engine RSS child processes, which
-roughly halves wall time).
+roughly halves wall time), `--no-decode` (skips the decode pass).
 
 ## The engines
 
@@ -116,6 +141,12 @@ measurement.
 | [minbpe](engines/minbpe) | Python | subprocess | runner written — the *floor*, not a competitor |
 | [mistral-common](engines/mistral-common) | Python | subprocess | runner written — needs `tekken.json` |
 | [ai-tokenizer](engines/ai-tokenizer) | JS | subprocess | runner written — needs a named encoding |
+
+**Decode** is wired for `hf-tokenizers` (the decode oracle), `pipeline`, `tokie`,
+`tiktoken` and `fastokens`. The rest report `decode_unsupported` and are absent
+from the decode ranking — for the scaffolded ones because they cannot encode the
+cell either, and for the remainder because nobody has written the `fn decode`
+yet. That is one method per adapter, and a welcome PR.
 
 ### The controlled comparison
 
@@ -192,6 +223,8 @@ The driver writes `tokenizer_bench_results.json`:
       "breakdown_nanoseconds": { "normalization": 0, "pre_tokenization": 0,
                                  "core_encoding": 0, "post_processing": 0 },
       "engine_class": "native", "verified": true, "ids_hash": "47cdd1399a60de5a",
+      "decode_mbps": 412.7, "decode_ns_per_token": 9.8,
+      "decode_text_hash": "b3f1c0a29e4d5107", "decode_verified": true,
       "rss_delta_mb": 45.4, "crate_size_kb": 181.0 }
   ],
   "runs": [ "...one entry per model x corpus cell..." ]
@@ -202,6 +235,11 @@ The driver writes `tokenizer_bench_results.json`:
 stages. The dashboard renders that as "not instrumented" rather than inventing a
 split, because an invented split is indistinguishable from a measured one once
 it is a coloured bar.
+
+The `decode_*` fields are omitted the same way, and for the same reason: an
+engine with no decode entry point carries `decode_unsupported` with the reason
+instead of a zero that would sort as "slow". Every field is optional, so a
+reader written against the pre-decode schema still parses the document.
 
 ## Adding an engine
 
@@ -214,10 +252,18 @@ impl Build for Adapter {
 }
 impl Engine for Adapter {
     fn info(&self) -> Info { ... }                      // version, class, disclosures
-    fn encode(&mut self, text: &str, out: &mut Ids) { } // the only timed call
+    fn encode(&mut self, text: &str, out: &mut Ids) { } // timed: encode
     fn phases(&mut self, text: &str) -> Option<Phases> { None }  // optional
+    fn decode(&mut self, ids: &[u32], out: &mut String)          // timed: decode
+        -> Result<(), Unsupported> { ... }                       // optional
 }
 ```
+
+`decode` is the one method that may decline: the default returns `Unsupported`,
+which keeps the engine out of the decode ranking instead of scoring it zero
+there. Implement it if the library has a decode entry point, and return `Err`
+rather than pushing a short string if a particular id cannot be mapped — a
+truncated `out` would otherwise hash as a fast, wrong decode.
 
 Use the library's ordinary public API — the one a user would call. If it forces
 an allocation or a type conversion, that cost stays in the measurement, because
