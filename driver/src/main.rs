@@ -549,7 +549,7 @@ fn main() -> Result<()> {
                         // Multi-thread sweep, only on the corpora asked for.
                         // Runs after the single-thread timing so it can never
                         // perturb the headline number.
-                        let scaling = if args.scaling.iter().any(|c| *c == corpus_name) {
+                        let scaling = if args.scaling.contains(&corpus_name) {
                             let make = || ctor(&model).ok();
                             let pts =
                                 // 100 ms per timed pass: long enough that thread
