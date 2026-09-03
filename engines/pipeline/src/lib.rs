@@ -1,5 +1,5 @@
 //! The HuggingFace **rc0 pipeline** — `tk-encode` + `tk-serialize` from
-//! [`feat/train_encode_split`](https://github.com/huggingface/tokenizers/tree/feat/train_encode_split),
+//! [`tokenizers-rc0`](https://github.com/huggingface/tokenizers/tree/5c3727a93bd64cd9caf0e229c637fc71f2cd2fce),
 //! the 1.0.0-rc.0 line.
 //!
 //! This is the interesting row in the table: it is the same project as the
@@ -102,10 +102,10 @@ impl Engine for Adapter {
         Info {
             name: "pipeline",
             // Not a release: a pinned rev on the rc0 branch. See Cargo.toml.
-            version: "tk-encode 1.0.0-rc.0 (feat/train_encode_split @ 0743ac07)",
+            version: "tk-encode 1.0.0-rc.0 (tokenizers-rc0 @ 5c3727a9)",
             lang: "rust",
             class: Class::Native,
-            url: "https://github.com/huggingface/tokenizers/tree/feat/train_encode_split",
+            url: "https://github.com/huggingface/tokenizers/tree/5c3727a93bd64cd9caf0e229c637fc71f2cd2fce",
             also_computes: "",
             internally_parallel: false,
         }

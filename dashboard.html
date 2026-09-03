@@ -503,6 +503,8 @@ function render(){
   }
 
   $("#app").innerHTML = `
+    ${DATA?.aggregation?.complete_reports?`<div class="notice"><b>Median of ${DATA.aggregation.complete_reports} complete runs.</b>
+      Scaling efficiency is paired with the 1-thread result from the same run before aggregation.</div>`:""}
     ${bad.length?`<div class="notice bad"><b>${bad.length} of ${ran.length} measured cells produced different token ids</b> than <code>${REF}</code>.
       They are drawn with a red border and an ✗, and excluded from every ranking — a different id stream is a different computation, not a faster one.</div>`:""}
 
@@ -940,7 +942,13 @@ function wire(){
 }
 
 /* ---- input --------------------------------------------------------------- */
-function load(o,label){ DATA=o; $("#loaded").textContent=label; render(); }
+function load(o,label){
+  DATA=o;
+  const a=o?.aggregation;
+  $("#loaded").textContent=a?.complete_reports
+    ? `median of ${a.complete_reports} complete runs · ${label}` : label;
+  render();
+}
 function readFile(f){
   const rd=new FileReader();
   rd.onload=()=>{ try{ load(JSON.parse(rd.result),`${f.name} · ${(f.size/1024).toFixed(0)} kB`); }

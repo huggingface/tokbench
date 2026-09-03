@@ -673,8 +673,7 @@ pub fn measure_scaling(
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     let bytes: usize = chunks.iter().map(|c| c.len()).sum();
-    let mut out: Vec<ThreadPoint> = Vec::new();
-    let mut base = f64::NAN;
+    let mut measured: Vec<(usize, f64)> = Vec::new();
 
     // How many times to walk the corpus inside ONE timed pass.
     //
@@ -696,7 +695,7 @@ pub fn measure_scaling(
     } else {
         let mut probe = match make() {
             Some(e) => e,
-            None => return out,
+            None => return Vec::new(),
         };
         let mut buf: Ids = Vec::new();
         for c in chunks {
@@ -724,7 +723,7 @@ pub fn measure_scaling(
         for _ in 0..n {
             match make() {
                 Some(e) => engines.push(e),
-                None => return out,
+                None => return Vec::new(),
             }
         }
         for e in engines.iter_mut() {
@@ -761,21 +760,34 @@ pub fn measure_scaling(
 
         let secs = median(samples);
         let mbps = (total_bytes as f64 / (1024.0 * 1024.0)) / secs;
-        if n == counts[0] {
-            base = mbps;
-        }
-        let ideal = base * n as f64 / counts[0] as f64;
-        out.push(ThreadPoint {
-            threads: n,
-            mbps,
-            efficiency_pct: if ideal > 0.0 {
-                mbps / ideal * 100.0
-            } else {
-                0.0
-            },
-        });
+        measured.push((n, mbps));
     }
-    out
+
+    // Measurement order may be reversed between complete runs to expose
+    // thermal or temporal drift. Always pair against the measured 1-thread
+    // point, then return a canonical thread-count order for JSON consumers.
+    let Some(base) = measured
+        .iter()
+        .find_map(|(threads, mbps)| (*threads == 1).then_some(*mbps))
+    else {
+        return Vec::new();
+    };
+    measured.sort_unstable_by_key(|(threads, _)| *threads);
+    measured
+        .into_iter()
+        .map(|(threads, mbps)| {
+            let ideal = base * threads as f64;
+            ThreadPoint {
+                threads,
+                mbps,
+                efficiency_pct: if ideal > 0.0 {
+                    mbps / ideal * 100.0
+                } else {
+                    0.0
+                },
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -1012,6 +1024,19 @@ mod tests {
         for p in &pts {
             assert!(p.mbps > 0.0 && p.mbps.is_finite());
         }
+    }
+
+    #[test]
+    fn scaling_can_be_measured_in_reverse_but_is_reported_in_order() {
+        let chunks = vec!["some representative text".repeat(100)];
+        let make = || Some(Box::new(Bytes) as Box<dyn Engine>);
+        let pts = measure_scaling(&make, &chunks, &[4, 2, 1], 1, 0.0);
+
+        assert_eq!(
+            pts.iter().map(|point| point.threads).collect::<Vec<_>>(),
+            vec![1, 2, 4]
+        );
+        assert!((pts[0].efficiency_pct - 100.0).abs() < 1e-6);
     }
 
     /// Chunk boundaries must never split a multi-byte character, or engines

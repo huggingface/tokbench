@@ -49,6 +49,28 @@ tokbench fixes the measurement, not the result:
 
 The contract is written out in full at the top of [`core/src/lib.rs`](core/src/lib.rs).
 
+## Hugging Face Jobs
+
+[`jobs/`](jobs/) contains a reproducible cloud runner. It builds tokbench into
+an immutable container, requires a pinned input-data revision, runs several
+complete process-level repetitions, records the CPU and software environment,
+and writes raw reports plus checksums to a mounted Storage Bucket. See
+[`jobs/README.md`](jobs/README.md) for the image and submission commands.
+
+After the Job completes, fetch all of its reports and open their median in the
+native dashboard. Add `RUN=3` to inspect one underlying run:
+
+```bash
+make dash BUCKET=huggingface/tokbench-results JOB_ID=<job-id>
+```
+
+The blog's original eight-model encode matrix is available as
+`python jobs/submit.py --profile blog-v1 ...`.
+
+The Jobs runner is intended for reproducible invocation and for measuring
+variance. A hardware flavor does not guarantee that separate Jobs use the same
+physical CPU, so absolute results remain machine-specific.
+
 ## Decode
 
 Both directions are measured in the same run. Decode reports two rates, because
@@ -76,7 +98,7 @@ cell is marked `differ` and excluded from every ranking.
 | engine | language | class | status |
 |---|---|---|---|
 | [hf-tokenizers](engines/hf-tokenizers) | Rust | native | **wired** — reference + oracle, 4-phase instrumented |
-| [pipeline](engines/pipeline) | Rust | native | **wired** — the rc0 pipeline, [tk-encode 1.0.0-rc.0](https://github.com/huggingface/tokenizers/tree/feat/train_encode_split) |
+| [pipeline](engines/pipeline) | Rust | native | **wired** — the rc0 pipeline, [tk-encode 1.0.0-rc.0](https://github.com/huggingface/tokenizers/tree/5c3727a93bd64cd9caf0e229c637fc71f2cd2fce) |
 | [kitoken](engines/kitoken) | Rust | native | **wired** — BPE + Unigram + WordPiece from one crate |
 | [tokie](engines/tokie) | Rust | native | **wired, verified** |
 | [tiktoken](engines/tiktoken) | Rust | native | **wired, verified** (needs derived `ranks.tiktoken`) |

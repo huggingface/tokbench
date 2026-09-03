@@ -8,6 +8,13 @@ PY ?= python3
 DATA := data
 MODELS := $(DATA)/models
 FIXTURES := $(DATA)/fixtures
+HF_TEST_REVISION ?=
+HF_REVISION_ARG := $(if $(strip $(HF_TEST_REVISION)),--revision $(HF_TEST_REVISION),)
+BUCKET ?=
+JOB_ID ?=
+RUN ?=
+RESULTS ?=
+DASH_PORT ?= 8712
 
 # Same fixture set as the upstream tokenizers pipeline benchmark, so numbers
 # stay comparable with it.
@@ -33,12 +40,14 @@ fixtures:
 	@for f in $(FIXTURE_LANGS); do \
 	  [ -f $(FIXTURES)/$$f.txt ] || { echo "fetch lang/$$f"; \
 	    $(HF) download $(HF_TEST_REPO) fixtures/lang/$$f.txt --repo-type dataset \
+	      $(HF_REVISION_ARG) \
 	      --local-dir $(DATA)/_dl >/dev/null && \
 	    cp $(DATA)/_dl/fixtures/lang/$$f.txt $(FIXTURES)/ ; } ; \
 	done
 	@for f in $(FIXTURE_MODALITIES); do \
 	  [ -f $(FIXTURES)/$$f.txt ] || { echo "fetch modalities/$$f"; \
 	    $(HF) download $(HF_TEST_REPO) fixtures/modalities/$$f.txt --repo-type dataset \
+	      $(HF_REVISION_ARG) \
 	      --local-dir $(DATA)/_dl >/dev/null && \
 	    cp $(DATA)/_dl/fixtures/modalities/$$f.txt $(FIXTURES)/ ; } ; \
 	done
@@ -61,6 +70,7 @@ models:
 	  [ -f $(MODELS)/$$m/tokenizer.json ] || { echo "fetch model $$m"; \
 	    mkdir -p $(MODELS)/$$m && \
 	    $(HF) download $(HF_TEST_REPO) models/$$m/tokenizer.json --repo-type dataset \
+	      $(HF_REVISION_ARG) \
 	      --local-dir $(DATA)/_dl >/dev/null && \
 	    cp $(DATA)/_dl/models/$$m/tokenizer.json $(MODELS)/$$m/ ; } ; \
 	done
@@ -75,26 +85,32 @@ sizes:
 
 .PHONY: bench
 bench:
-	cargo run --release -p tokbench --features rust-engines -- --reps 5
+	cargo run --locked --release -p tokbench --features rust-engines -- --reps 5
 
 .PHONY: bench-open
 bench-open:
-	cargo run --release -p tokbench --features rust-engines -- --reps 5 --open
+	cargo run --locked --release -p tokbench --features rust-engines -- --reps 5 --open
 
 .PHONY: test
 test:
 	cargo test -p tokbench-core
 	$(PY) python/harness.py
+	$(PY) -m unittest discover -s jobs -p 'test_*.py'
 
 .PHONY: clean
 clean:
 	rm -f tokenizer_bench_results.json binary_sizes.json package_sizes.json
 	cargo clean
 
-# Serve the dashboard over http so it can auto-load the results file
-# (a file:// page cannot fetch a sibling file), then open it.
+# Fetch and aggregate a Job when BUCKET + JOB_ID are set, or stage RESULTS when
+# it names a local report/directory. With no arguments this preserves the local
+# tokenizer_bench_results.json workflow. RUN selects one report; the default is
+# the median across every complete run in the Job.
 .PHONY: dash
 dash:
-	@python3 -m http.server 8712 --bind 127.0.0.1 >/dev/null 2>&1 & \
-	 sleep 1; open http://127.0.0.1:8712/dashboard.html; \
-	 echo "serving on http://127.0.0.1:8712/dashboard.html (Ctrl-C the server with: pkill -f 'http.server 8712')"
+	$(PY) jobs/dash.py \
+	  $(if $(BUCKET),--bucket "$(BUCKET)") \
+	  $(if $(JOB_ID),--job-id "$(JOB_ID)") \
+	  $(if $(RUN),--run "$(RUN)") \
+	  $(if $(RESULTS),--results "$(RESULTS)") \
+	  --port "$(DASH_PORT)"

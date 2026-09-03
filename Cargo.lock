@@ -174,7 +174,7 @@ checksum = "b588b76d00fde79687d7646a9b5bdf3cc0f655e0bbd080335a95d7e96f3587da"
 [[package]]
 name = "bitsplit"
 version = "0.1.0"
-source = "git+https://github.com/huggingface/tokenizers?rev=0743ac07cc2c8f5b890aa8c39c4a5400c32a295d#0743ac07cc2c8f5b890aa8c39c4a5400c32a295d"
+source = "git+https://github.com/huggingface/tokenizers?rev=5c3727a93bd64cd9caf0e229c637fc71f2cd2fce#5c3727a93bd64cd9caf0e229c637fc71f2cd2fce"
 dependencies = [
  "ahash",
 ]
@@ -2518,7 +2518,7 @@ checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
 [[package]]
 name = "tk-convert"
 version = "1.0.0-rc.0"
-source = "git+https://github.com/huggingface/tokenizers?rev=0743ac07cc2c8f5b890aa8c39c4a5400c32a295d#0743ac07cc2c8f5b890aa8c39c4a5400c32a295d"
+source = "git+https://github.com/huggingface/tokenizers?rev=5c3727a93bd64cd9caf0e229c637fc71f2cd2fce#5c3727a93bd64cd9caf0e229c637fc71f2cd2fce"
 dependencies = [
  "bitsplit",
  "serde_json",
@@ -2528,7 +2528,7 @@ dependencies = [
 [[package]]
 name = "tk-encode"
 version = "1.0.0-rc.0"
-source = "git+https://github.com/huggingface/tokenizers?rev=0743ac07cc2c8f5b890aa8c39c4a5400c32a295d#0743ac07cc2c8f5b890aa8c39c4a5400c32a295d"
+source = "git+https://github.com/huggingface/tokenizers?rev=5c3727a93bd64cd9caf0e229c637fc71f2cd2fce#5c3727a93bd64cd9caf0e229c637fc71f2cd2fce"
 dependencies = [
  "ahash",
  "bitsplit",
@@ -2552,7 +2552,7 @@ dependencies = [
 [[package]]
 name = "tk-serialize"
 version = "1.0.0-rc.0"
-source = "git+https://github.com/huggingface/tokenizers?rev=0743ac07cc2c8f5b890aa8c39c4a5400c32a295d#0743ac07cc2c8f5b890aa8c39c4a5400c32a295d"
+source = "git+https://github.com/huggingface/tokenizers?rev=5c3727a93bd64cd9caf0e229c637fc71f2cd2fce#5c3727a93bd64cd9caf0e229c637fc71f2cd2fce"
 dependencies = [
  "base64 0.22.1",
  "bitsplit",

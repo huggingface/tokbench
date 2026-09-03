@@ -17,6 +17,7 @@
 mod registry;
 
 use std::collections::BTreeMap;
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Instant;
@@ -95,6 +96,17 @@ struct Args {
     /// the same answer for a fraction of the cost.
     #[arg(long = "scaling")]
     scaling: Vec<String>,
+
+    /// Do not include thread counts above this value in scaling sweeps.
+    /// Useful on large cloud instances when the published claim is scoped to
+    /// a fixed core count such as 8.
+    #[arg(long)]
+    max_threads: Option<NonZeroUsize>,
+
+    /// Measure scaling points from the highest thread count down to one.
+    /// Jobs alternate this with the default order to expose temporal drift.
+    #[arg(long)]
+    reverse_scaling: bool,
 
     /// Per-engine stripped binary deltas, as written by `scripts/binsize.sh`.
     /// Merged into the report when present.
@@ -305,6 +317,10 @@ fn stem(p: &Path) -> String {
     p.file_stem().unwrap_or_default().to_string_lossy().into()
 }
 
+fn directory_name(p: &Path) -> String {
+    p.file_name().unwrap_or_default().to_string_lossy().into()
+}
+
 fn main() -> Result<()> {
     let args = Args::parse();
 
@@ -355,7 +371,13 @@ fn main() -> Result<()> {
 
     let natives = registry::native();
     let scripted = registry::scripted();
-    let thread_sweep = tokbench_core::thread_counts();
+    let mut thread_sweep = tokbench_core::thread_counts();
+    if let Some(max_threads) = args.max_threads {
+        thread_sweep.retain(|threads| *threads <= max_threads.get());
+    }
+    if args.reverse_scaling {
+        thread_sweep.reverse();
+    }
     if !args.scaling.is_empty() {
         eprintln!(
             "scaling sweep on {:?} at thread counts {:?}",
@@ -384,7 +406,10 @@ fn main() -> Result<()> {
     let mut done = 0usize;
 
     for model_dir in &models {
-        let model_name = stem(model_dir);
+        // A model directory may contain a dot (for example `glm-5.2`). Using
+        // `file_stem` on a directory silently truncated it to `glm-5`, which
+        // also made `--model glm-5.2` unable to select it.
+        let model_name = directory_name(model_dir);
         if !args.model.is_empty() && !args.model.contains(&model_name) {
             continue;
         }
@@ -564,7 +589,10 @@ fn main() -> Result<()> {
                                     0.100,
                                 );
                             if !pts.is_empty() {
-                                let best = pts.last().unwrap();
+                                let best = pts
+                                    .iter()
+                                    .max_by_key(|point| point.threads)
+                                    .unwrap();
                                 eprintln!(
                                     "        threads {} -> {:.1} MB/s ({:.0}% of linear)",
                                     best.threads, best.mbps, best.efficiency_pct

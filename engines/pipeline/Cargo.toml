@@ -4,12 +4,12 @@ version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "tokbench engine: the HuggingFace rc0 pipeline (tk-encode + tk-serialize, feat/train_encode_split)."
+description = "tokbench engine: the HuggingFace rc0 pipeline (tk-encode + tk-serialize, tokenizers-rc0)."
 
 [dependencies]
 tokbench-core.workspace = true
 
-# `feat/train_encode_split` — the 1.0.0-rc.0 line. Pinned by REV, not by branch:
+# `tokenizers-rc0` — the 1.0.0-rc.0 line. Pinned by REV, not by branch:
 # the previous pin here was `branch = "poc/target-encode"`, and a branch pin is
 # what let this engine silently keep measuring a decode path that the branch had
 # since replaced. A rev is reproducible, and a stale rev is at least visible.
@@ -21,7 +21,7 @@ tokbench-core.workspace = true
 #
 # tk-encode is edition 2024, so this engine needs a recent toolchain; the rest
 # of the workspace does not.
-tk-encode = { git = "https://github.com/huggingface/tokenizers", rev = "0743ac07cc2c8f5b890aa8c39c4a5400c32a295d", package = "tk-encode", default-features = false, features = [
+tk-encode = { git = "https://github.com/huggingface/tokenizers", rev = "5c3727a93bd64cd9caf0e229c637fc71f2cd2fce", package = "tk-encode", default-features = false, features = [
   "normalizers",
   "unicode-scripts",
   "bpe",
@@ -36,7 +36,7 @@ tk-encode = { git = "https://github.com/huggingface/tokenizers", rev = "0743ac07
 # `parallelism` is deliberately NOT enabled, on either crate. The headline is a
 # single-thread number (fairness rule 5), and `Info::internally_parallel: false`
 # below has to stay true.
-tk-serialize = { git = "https://github.com/huggingface/tokenizers", rev = "0743ac07cc2c8f5b890aa8c39c4a5400c32a295d", package = "tk-serialize", default-features = false, features = [
+tk-serialize = { git = "https://github.com/huggingface/tokenizers", rev = "5c3727a93bd64cd9caf0e229c637fc71f2cd2fce", package = "tk-serialize", default-features = false, features = [
   "deserialize",
   "normalizers",
   "unicode-scripts",
@@ -50,4 +50,4 @@ tk-serialize = { git = "https://github.com/huggingface/tokenizers", rev = "0743a
 # 1.0, and rc0's reader is canonical-only (`version: "2.0"`) by design, so a
 # legacy config has to go through here first. This is exactly what upstream's
 # own `tk-serialize` benches do, and it runs at load time, outside the timer.
-tk-convert = { git = "https://github.com/huggingface/tokenizers", rev = "0743ac07cc2c8f5b890aa8c39c4a5400c32a295d", package = "tk-convert" }
+tk-convert = { git = "https://github.com/huggingface/tokenizers", rev = "5c3727a93bd64cd9caf0e229c637fc71f2cd2fce", package = "tk-convert" }
