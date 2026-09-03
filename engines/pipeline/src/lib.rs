@@ -1,103 +1,98 @@
-//! The HuggingFace **target encode path** — `PipelineTokenizer` from
-//! [tokenizers#2279](https://github.com/huggingface/tokenizers/pull/2279)
-//! (`poc/target-encode`, which carries bitsplit) with the metaspace-runs
-//! pre-tokenizer from [#2296](https://github.com/huggingface/tokenizers/pull/2296)
-//! stacked on top.
+//! The HuggingFace **rc0 pipeline** — `tk-encode` + `tk-serialize` from
+//! [`feat/train_encode_split`](https://github.com/huggingface/tokenizers/tree/feat/train_encode_split),
+//! the 1.0.0-rc.0 line.
 //!
-//! This is the interesting row in the table: same project as the reference
-//! engine, same `tokenizer.json`, so the difference between `hf-tokenizers`
-//! and `pipeline` is the encode path itself rather than a different
-//! vocabulary or a different idea of what a token is. Every other pairing here
-//! compares across projects; this one is a controlled before/after.
+//! This is the interesting row in the table: it is the same project as the
+//! reference engine, reading the same `tokenizer.json`, so the difference
+//! between `hf-tokenizers` and `pipeline` is purely the new engine rather than
+//! a different vocabulary, a different pre-tokenizer, or a different notion of
+//! what a token is. Every other engine in this repository is a comparison
+//! across projects; this one is a controlled before/after.
 //!
-//! Which makes verification matter more here, not less. A rewritten merge loop
-//! and pre-tokenizer is exactly the kind of change that can be very fast and
-//! subtly wrong on some script, so the `verified` flag against
-//! `tokenizers 0.23.1` is the whole point — a mismatch on any corpus is a bug
-//! report, not a benchmark result.
+//! Which makes verification matter more here, not less. A rewrite of the merge
+//! loop, the pre-tokenizer and now the decoder is exactly the kind of change
+//! that can be very fast and subtly wrong on some script, so the `verified`
+//! and `decode_verified` flags against `tokenizers 0.23.1` are the whole point
+//! — a mismatch on any corpus is a bug report, not a benchmark result.
 //!
-//! ## Getting the entry point wrong is easy — a note for the next person
+//! ## Why this engine was repinned, and what it invalidates
 //!
-//! `tk_encode::Tokenizer::from_file(..).encode_fast(..)` compiles, runs, and
-//! returns correct ids. It is also the **legacy** path this PR carries
-//! alongside the new one, and it benchmarks ~100x slower than the work the PR
-//! is actually about. The target path is a different type entirely:
+//! This adapter used to hold a `tk_encode::Tokenizer` from
+//! [#2279](https://github.com/huggingface/tokenizers/pull/2279)'s
+//! `poc/target-encode` branch. On rc0 that type does not exist: the legacy
+//! encode engine and its serde layer were stripped, and the runtime is
+//! `PipelineTokenizer`, built by `tk-serialize` from a canonical config.
 //!
-//! ```ignore
-//! let legacy = tk_encode::Tokenizer::from_file(path)?;   // parse the config
-//! let pipe = PipelineTokenizer::try_from(&legacy)?;       // build the fast path
-//! pipe.encode_generic::<{ PipelineTokenizer::STAGE_POSTPROCESS }>(text, false)?;
-//! ```
+//! So this is a different engine, not a version bump, and **every number it
+//! reports is re-baselined** — encode as much as decode.
 //!
-//! `STAGE_POSTPROCESS` is the full pipeline; the lower `STAGE_*` constants are
-//! the ablation ladder (frame / normalize / split / model) and must NOT be used
-//! for a headline number, since they skip real work.
+//! The repin also fixes a measurement bug worth naming, because a branch pin
+//! caused it. On `poc/target-engine` the pipeline's own decode was a
+//! deliberate stub (`Err("PipelineTokenizer::decode is not implemented yet")`),
+//! and this adapter reached the *legacy* `Tokenizer::decode` instead. That is
+//! the "before" column of
+//! [#2305](https://github.com/huggingface/tokenizers/pull/2305), so the decode
+//! row published for this engine was the path #2305 replaced, measured twice —
+//! once through each adapter — and read as "the new engine decodes no faster".
+//! Hence `rev = "..."` in `Cargo.toml` rather than a branch.
 //!
-//! ## Buffers, and the one cost this adapter adds
+//! One thing the repin takes away. This adapter used to report a phase
+//! breakdown by timing successive rungs of `encode_generic`'s monomorphised
+//! `STAGE` ladder; rc0 has no such ladder, so `phases()` is gone and this
+//! engine's `breakdown_nanoseconds` is omitted rather than guessed. The
+//! dashboard renders that as "not instrumented", which is the honest reading:
+//! the total is still measured, the split is not.
 //!
-//! On this branch `encode_generic` takes caller-owned `pre_tokens`, `scratch`
-//! and `output`, so they live in the adapter and are reused — the
-//! configuration a server runs and the one the PR's own bench measures.
+//! ## Why `encode_into`
 //!
-//! What is NOT elided is the `.map(|t| t.id)` below. `encode_generic` fills a
-//! `Vec<PipelineToken>` (a one-field `{ id: u32 }` struct) while the harness
-//! compares `Vec<u32>`, and tk-encode exposes no flat-`u32` entry point, so a
-//! caller wanting ids pays this restatement too. Measured at +1% to +8%
-//! (median ~4%) by building once with the copy removed.
+//! `encode_into` is the allocation-free, offset-free path: no `Encoding`, no
+//! `Vec<Encoding>`, no copy out of either. The reference engine is called
+//! through `encode`, which also computes byte offsets, word ids and an
+//! attention mask. Timing this side's *offset-computing* path against
+//! competitors that only produce ids would be the wrong comparison, and timing
+//! the reference's ids-only path while calling this one's full path would be
+//! the wrong comparison in the other direction.
+//!
+//! Both are declared honestly instead of quietly equalised: the reference
+//! discloses `also_computes: "byte offsets, word ids, attention mask"` and this
+//! engine discloses nothing extra, so a reader can see that part of any gap
+//! between the two is offset bookkeeping rather than raw encode speed. The ids
+//! are identical either way, which is what `verified` checks.
+//!
+//! One cost is charged to this engine and is *not* an artefact to be excused:
+//! `encode_into` fills `Vec<PipelineToken>`, and tokbench compares `Vec<u32>`,
+//! so the adapter restates one as the other on every call. `PipelineToken` is
+//! `repr(transparent)` over `u32`, so this is a copy and nothing more — but it
+//! is a copy the public API forces, the user pays it too, and the fairness
+//! contract says it stays in the number.
 
-use std::path::PathBuf;
-use std::time::Instant;
-use tk_encode::pipeline::{Model, PipelineModelScratch, PipelineToken, PipelineTokenizer, Span};
-use tk_encode::Tokenizer;
-
-use tokbench_core::{
-    unsupported, Build, Class, Engine, Ids, Info, Model as BenchModel, Phases, Unsupported,
-};
+use tk_encode::pipeline::{PipelineToken, PipelineTokenizer};
+use tokbench_core::{unsupported, Build, Class, Engine, Ids, Info, Model, Unsupported};
 
 pub struct Adapter {
-    pipe: PipelineTokenizer,
-    /// Caller-owned and reused, which is what this branch's `encode_generic`
-    /// expects and what a server would do. Allocating per call would charge the
-    /// engine a malloc plus a first-touch of the whole token array every
-    /// document -- a cost that scales with TOKEN count, so it would penalise
-    /// token-dense scripts rather than measure the encoder.
-    pre_tokens: Vec<Span>,
-    scratch: PipelineModelScratch,
-    toks: Vec<PipelineToken>,
-    /// Where to find the config again, for the decode path below. Holding the
-    /// path is free; holding the tokenizer it loads is not, which is the whole
-    /// reason this is a path and not a `Tokenizer`.
-    path: PathBuf,
-    /// Loaded on the first `decode` call rather than in `build` -- see
-    /// [`Adapter::decode`] for why that matters to the footprint number.
-    decoder: Option<Tokenizer>,
+    tok: PipelineTokenizer,
+    /// Reused across calls, so the timed loop never grows it — the same
+    /// buffer-reuse a real encode loop does, and what `encode_into` is for.
+    scratch: Vec<PipelineToken>,
 }
 
 impl Build for Adapter {
-    fn build(model: &BenchModel) -> Result<Box<dyn Engine>, Unsupported> {
+    fn build(model: &Model) -> Result<Box<dyn Engine>, Unsupported> {
         let path = model.tokenizer_json();
         if !path.exists() {
             return Err(Unsupported("no tokenizer.json".into()));
         }
-        // The legacy tokenizer is only the config parser here — it is dropped
-        // once the pipeline is built, and is never on the measured path. The
-        // decode path below loads its own, off the clock and out of the
-        // footprint sample.
-        let legacy = Tokenizer::from_file(&path)
-            .map_err(|e| Unsupported(format!("tk-encode cannot load this config: {e}")))?;
-        let pipe = PipelineTokenizer::try_from(&legacy).map_err(|e| {
-            Unsupported(format!(
-                "PipelineTokenizer does not support this config yet: {e}"
-            ))
-        })?;
-        let scratch = pipe.get_model().init_scratch();
+        // Every config in `data/models` is still version 1.0, and rc0's reader
+        // is canonical-only (`version: "2.0"`) by design. The upgrade pass is a
+        // pure JSON->JSON rewrite and runs here, at load time, outside the
+        // timed region — the same thing upstream's own benches do.
+        let canonical = tk_convert::canonicalize_file(&path)
+            .map_err(|e| Unsupported(format!("tk-convert cannot upgrade this config: {e}")))?;
+        let tok = tk_serialize::from_json(&canonical)
+            .map_err(|e| Unsupported(format!("tk-serialize cannot read this config: {e}")))?;
         Ok(Box::new(Adapter {
-            pipe,
-            pre_tokens: Vec::new(),
-            scratch,
-            toks: Vec::new(),
-            path,
-            decoder: None,
+            tok,
+            scratch: Vec::new(),
         }))
     }
 }
@@ -106,173 +101,37 @@ impl Engine for Adapter {
     fn info(&self) -> Info {
         Info {
             name: "pipeline",
-            // Not a release: the exact stacked tree that was measured.
-            version: "tk-encode (#2279 poc/target-encode + #2296 metaspace runs, e35dc99c)",
+            // Not a release: a pinned rev on the rc0 branch. See Cargo.toml.
+            version: "tk-encode 1.0.0-rc.0 (feat/train_encode_split @ 0743ac07)",
             lang: "rust",
             class: Class::Native,
-            url: "https://github.com/huggingface/tokenizers/pull/2296",
+            url: "https://github.com/huggingface/tokenizers/tree/feat/train_encode_split",
             also_computes: "",
             internally_parallel: false,
         }
     }
 
     fn encode(&mut self, text: &str, out: &mut Ids) {
-        self.toks.clear();
-        let r = self
-            .pipe
-            .encode_generic::<{ PipelineTokenizer::STAGE_POSTPROCESS }>(
-                text,
-                false,
-                &mut self.pre_tokens,
-                &mut self.scratch,
-                &mut self.toks,
-            );
-        // On failure `out` stays short, which changes the id hash, so the
-        // verification gate reports it instead of it passing as a fast run.
-        if r.is_ok() {
-            out.extend(self.toks.iter().map(|t| t.id));
+        self.scratch.clear();
+        // A cell that fails mid-run must not silently look fast. Leaving `out`
+        // short changes the id hash, so verification flags it.
+        if self.tok.encode_into(text, false, &mut self.scratch).is_ok() {
+            out.extend(self.scratch.iter().map(|t| t.id()));
         }
     }
 
-    /// There is no `decode_fast` counterpart to `encode_fast`: the PR's work
-    /// is on the encode path, so decode goes through the ordinary entry point
-    /// and this number is expected to sit near the reference's.
-    ///
-    /// `PipelineTokenizer::decode` exists on this rev but is a stub that fails
-    /// loud -- the pipeline decode path is still being built -- so the number
-    /// has to come from the legacy `Tokenizer`: same config, its released
-    /// decode path.
-    ///
-    /// It is loaded here rather than in `build`, and that is deliberate. The
-    /// footprint pass samples the live heap across `build` and never calls
-    /// `decode`, so a second full tokenizer held from `build` would roughly
-    /// double this engine's reported `heap_load_mb` for something the encode
-    /// path does not use. `measure_decode` runs one untimed probe pass over
-    /// every chunk before it starts the clock, so the load lands there and is
-    /// charged to neither number.
+    /// `PipelineTokenizer::decode` — the path
+    /// [#2305](https://github.com/huggingface/tokenizers/pull/2305) added.
+    /// For a byte-level BPE model the vocab store already holds each entry's
+    /// decoded raw bytes, so this is a concatenation of borrowed slices; other
+    /// models still run the configured decoder chain.
     fn decode(&mut self, ids: &[u32], out: &mut String) -> Result<(), Unsupported> {
-        if self.decoder.is_none() {
-            self.decoder = Some(
-                Tokenizer::from_file(&self.path)
-                    .map_err(|e| Unsupported(format!("tk-encode cannot load this config: {e}")))?,
-            );
-        }
-        let tok = self.decoder.as_ref().expect("loaded just above");
-        match tok.decode(ids, false) {
+        match self.tok.decode(ids, false) {
             Ok(s) => {
                 out.push_str(&s);
                 Ok(())
             }
             Err(e) => unsupported(format!("decode failed: {e}")),
         }
-    }
-
-    /// Phase costs by **ablation**, not instrumentation.
-    ///
-    /// `encode_generic` is monomorphised on a `STAGE` constant, so the compiler
-    /// emits a separate function per prefix of the pipeline: frame only, frame
-    /// plus normalize, and so on up to the full encode. Each is real optimised
-    /// code with no timing branches inside the hot loop -- the reason the PR
-    /// carries the ladder at all -- so timing successive rungs and subtracting
-    /// attributes cost without perturbing what is measured.
-    ///
-    /// Read it differently from `hf-tokenizers`' breakdown. That one runs each
-    /// component and clocks it directly. This one subtracts two whole-pipeline
-    /// timings, so a phase's bucket here absorbs any effect it has on the
-    /// phases after it. The totals are honest; the attribution is a difference
-    /// of totals.
-    ///
-    /// ## The cache has to be dropped between reps
-    ///
-    /// The `WordCache` lives in the caller-owned `BpeScratch`, so it survives
-    /// an encode call -- which is the point of it, and right for the headline
-    /// number, where every timed pass sees a slice of text the instance has not
-    /// seen before. Here it is poison: this re-encodes *the same chunk* once
-    /// per rep, so with the cache kept, rep 2 onward times a hash lookup rather
-    /// than a merge. Both ways that went wrong before it was fixed:
-    ///
-    /// * Minimum of 9 reps reported **1.09 ms** for a corpus that takes ~7 ms
-    ///   to encode -- the minimum was just the most-memoised pass.
-    /// * Run in ladder order, `STAGE_MODEL` filled the cache and
-    ///   `STAGE_POSTPROCESS`, timed next on the same text, came out at **0.1%**
-    ///   of gpt2/english against the reference engine's 9.6%.
-    ///
-    /// So every rep gets a fresh scratch, allocated outside the clock. Each
-    /// rung is measured from a cold cache, which also kills the ladder-order
-    /// effect: no rung can warm the one after it.
-    ///
-    /// ## What a cold rep costs, and why it is still the right choice
-    ///
-    /// Dropping the cache is not free of consequence: it changes both the total
-    /// and the attribution, because a cold merge loop does work a warm one
-    /// skips. gpt2/english, same chunks, same code:
-    ///
-    /// ```text
-    ///           total     normalize   pre-tokenize   model   post
-    /// warm      1.15 ms      0.0%         36.2%      63.8%   0.0%
-    /// cold      9.75 ms      0.0%          4.5%      95.5%   0.0%
-    /// ```
-    ///
-    /// The headline encode of those chunks is ~6.8 ms, between the two: the
-    /// harness reuses one instance across disjoint slices, so common words are
-    /// cached and rare ones are not. Neither ablation regime reproduces that,
-    /// and pretending otherwise would be the fabrication this module avoids.
-    ///
-    /// Cold is still right here for two reasons. It is the only regime that
-    /// does not hand the engine credit for having already seen the exact text
-    /// being timed. And `hf-tokenizers` keeps no such cache, so measuring cold
-    /// puts both engines' breakdowns in the same regime -- which is what makes
-    /// comparing their *proportions* legitimate.
-    ///
-    /// The attribution is still a difference of totals, so a phase's bucket
-    /// absorbs any effect it has on the phases after it.
-    ///
-    /// Only ever called outside the timed loop.
-    fn phases(&mut self, text: &str) -> Option<Phases> {
-        const PHASE_REPS: usize = 5;
-
-        // One monomorphised rung, median of `PHASE_REPS` cold reps. A macro
-        // because `STAGE` is a const generic argument: a closure cannot be
-        // generic over it, so each rung is spelled out as its own call.
-        macro_rules! rung {
-            ($stage:expr) => {{
-                let mut runs = [0u64; PHASE_REPS];
-                for slot in runs.iter_mut() {
-                    // A fresh scratch is a fresh `WordCache`. Allocated before
-                    // the clock starts, so it is not charged to the rung.
-                    self.scratch = self.pipe.get_model().init_scratch();
-                    self.toks.clear();
-                    let t = Instant::now();
-                    let r = self.pipe.encode_generic::<{ $stage }>(
-                        text,
-                        false,
-                        &mut self.pre_tokens,
-                        &mut self.scratch,
-                        &mut self.toks,
-                    );
-                    *slot = t.elapsed().as_nanos() as u64;
-                    r.ok()?;
-                }
-                runs.sort_unstable();
-                runs[PHASE_REPS / 2]
-            }};
-        }
-
-        let frame = rung!(PipelineTokenizer::STAGE_FRAME);
-        let normalize = rung!(PipelineTokenizer::STAGE_NORMALIZE);
-        let split = rung!(PipelineTokenizer::STAGE_SPLIT);
-        let model = rung!(PipelineTokenizer::STAGE_MODEL);
-        let post = rung!(PipelineTokenizer::STAGE_POSTPROCESS);
-
-        // `frame` is the added-token scan and span setup that every rung pays.
-        // It is not one of the four reported phases, so it is folded into
-        // pre-tokenisation, which is where a reader looking for "the cost of
-        // finding the pieces" would expect it.
-        Some(Phases {
-            normalization_ns: normalize.saturating_sub(frame),
-            pre_tokenization_ns: frame + split.saturating_sub(normalize),
-            core_encoding_ns: model.saturating_sub(split),
-            post_processing_ns: post.saturating_sub(model),
-        })
     }
 }

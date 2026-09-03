@@ -76,7 +76,7 @@ cell is marked `differ` and excluded from every ranking.
 | engine | language | class | status |
 |---|---|---|---|
 | [hf-tokenizers](engines/hf-tokenizers) | Rust | native | **wired** — reference + oracle, 4-phase instrumented |
-| [pipeline](engines/pipeline) | Rust | native | **wired** — the target encode path, [tokenizers#2279](https://github.com/huggingface/tokenizers/pull/2279) |
+| [pipeline](engines/pipeline) | Rust | native | **wired** — the rc0 pipeline, [tk-encode 1.0.0-rc.0](https://github.com/huggingface/tokenizers/tree/feat/train_encode_split) |
 | [kitoken](engines/kitoken) | Rust | native | **wired** — BPE + Unigram + WordPiece from one crate |
 | [tokie](engines/tokie) | Rust | native | **wired, verified** |
 | [tiktoken](engines/tiktoken) | Rust | native | **wired, verified** (needs derived `ranks.tiktoken`) |
