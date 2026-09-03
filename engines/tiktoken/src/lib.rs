@@ -22,7 +22,7 @@ use base64::Engine as _;
 // `FxHashMap` specifically — a `std::HashMap` will not coerce.
 use rustc_hash::FxHashMap;
 use tiktoken_rs::CoreBPE;
-use tokbench_core::{Build, Class, Engine, Ids, Info, Model, Unsupported};
+use tokbench_core::{unsupported, Build, Class, Engine, Ids, Info, Model, Unsupported};
 
 pub struct Adapter {
     bpe: CoreBPE,
@@ -90,5 +90,18 @@ impl Engine for Adapter {
 
     fn encode(&mut self, text: &str, out: &mut Ids) {
         out.extend_from_slice(&self.bpe.encode_ordinary(text));
+    }
+
+    /// `CoreBPE::decode` concatenates the raw token bytes and validates UTF-8.
+    /// No `tokenizer.json` decoder runs, because tiktoken has no such concept
+    /// — for the byte-level BPE models it supports, that is the whole job.
+    fn decode(&mut self, ids: &[u32], out: &mut String) -> Result<(), Unsupported> {
+        match self.bpe.decode(ids) {
+            Ok(s) => {
+                out.push_str(&s);
+                Ok(())
+            }
+            Err(e) => unsupported(format!("decode failed: {e}")),
+        }
     }
 }

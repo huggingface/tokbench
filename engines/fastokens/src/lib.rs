@@ -7,7 +7,7 @@
 //! hash stops matching the reference and the report marks the cell as a
 //! mismatch rather than quietly reporting a faster, different computation.
 
-use tokbench_core::{Build, Class, Engine, Ids, Info, Model, Unsupported};
+use tokbench_core::{unsupported, Build, Class, Engine, Ids, Info, Model, Unsupported};
 
 pub struct Adapter {
     tok: fastokens::Tokenizer,
@@ -41,6 +41,16 @@ impl Engine for Adapter {
     fn encode(&mut self, text: &str, out: &mut Ids) {
         if let Ok(ids) = self.tok.encode_ordinary(text) {
             out.extend_from_slice(&ids);
+        }
+    }
+
+    fn decode(&mut self, ids: &[u32], out: &mut String) -> Result<(), Unsupported> {
+        match self.tok.decode(ids, false) {
+            Ok(s) => {
+                out.push_str(&s);
+                Ok(())
+            }
+            Err(e) => unsupported(format!("decode failed: {e}")),
         }
     }
 }

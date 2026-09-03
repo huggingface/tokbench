@@ -13,7 +13,7 @@
 //! Either way the *encode* path being timed is identical; only build cost
 //! differs, and build cost is excluded from the timed region by design.
 
-use tokbench_core::{Build, Class, Engine, Ids, Info, Model, Unsupported};
+use tokbench_core::{unsupported, Build, Class, Engine, Ids, Info, Model, Unsupported};
 
 pub struct Adapter {
     tok: tokie::Tokenizer,
@@ -54,5 +54,19 @@ impl Engine for Adapter {
         // would additionally build an Encoding with offsets the reference is
         // not being charged for here.
         out.extend_from_slice(&self.tok.encode_ids(text, false));
+    }
+
+    /// `Tokenizer::decode` returns `Option`, with `None` for a byte sequence
+    /// that is not valid UTF-8. That is a real failure to reproduce the
+    /// reference's text, so it becomes `Unsupported` rather than an empty
+    /// push that would hash as a fast, wrong decode.
+    fn decode(&mut self, ids: &[u32], out: &mut String) -> Result<(), Unsupported> {
+        match self.tok.decode(ids) {
+            Some(s) => {
+                out.push_str(&s);
+                Ok(())
+            }
+            None => unsupported("decode returned None (invalid utf-8)"),
+        }
     }
 }

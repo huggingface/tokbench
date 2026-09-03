@@ -53,7 +53,7 @@ impl Engine for Adapter {
 
     fn encode(&mut self, text: &str, out: &mut Ids) {
         if let Ok(ids) = self.tok.encode(text, false) {
-            out.extend(ids.iter().map(|&t| t as u32));
+            out.extend(ids.iter().copied());
         }
     }
 }

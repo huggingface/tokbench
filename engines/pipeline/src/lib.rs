@@ -45,12 +45,13 @@
 //! caller wanting ids pays this restatement too. Measured at +1% to +8%
 //! (median ~4%) by building once with the copy removed.
 
+use std::path::PathBuf;
+use std::time::Instant;
 use tk_encode::pipeline::{Model, PipelineModelScratch, PipelineToken, PipelineTokenizer, Span};
 use tk_encode::Tokenizer;
-use std::time::Instant;
 
 use tokbench_core::{
-    Build, Class, Engine, Ids, Info, Model as BenchModel, Phases, Unsupported,
+    unsupported, Build, Class, Engine, Ids, Info, Model as BenchModel, Phases, Unsupported,
 };
 
 pub struct Adapter {
@@ -63,6 +64,13 @@ pub struct Adapter {
     pre_tokens: Vec<Span>,
     scratch: PipelineModelScratch,
     toks: Vec<PipelineToken>,
+    /// Where to find the config again, for the decode path below. Holding the
+    /// path is free; holding the tokenizer it loads is not, which is the whole
+    /// reason this is a path and not a `Tokenizer`.
+    path: PathBuf,
+    /// Loaded on the first `decode` call rather than in `build` -- see
+    /// [`Adapter::decode`] for why that matters to the footprint number.
+    decoder: Option<Tokenizer>,
 }
 
 impl Build for Adapter {
@@ -72,7 +80,9 @@ impl Build for Adapter {
             return Err(Unsupported("no tokenizer.json".into()));
         }
         // The legacy tokenizer is only the config parser here — it is dropped
-        // once the pipeline is built, and is never on the measured path.
+        // once the pipeline is built, and is never on the measured path. The
+        // decode path below loads its own, off the clock and out of the
+        // footprint sample.
         let legacy = Tokenizer::from_file(&path)
             .map_err(|e| Unsupported(format!("tk-encode cannot load this config: {e}")))?;
         let pipe = PipelineTokenizer::try_from(&legacy).map_err(|e| {
@@ -86,6 +96,8 @@ impl Build for Adapter {
             pre_tokens: Vec::new(),
             scratch,
             toks: Vec::new(),
+            path,
+            decoder: None,
         }))
     }
 }
@@ -119,6 +131,39 @@ impl Engine for Adapter {
         // verification gate reports it instead of it passing as a fast run.
         if r.is_ok() {
             out.extend(self.toks.iter().map(|t| t.id));
+        }
+    }
+
+    /// There is no `decode_fast` counterpart to `encode_fast`: the PR's work
+    /// is on the encode path, so decode goes through the ordinary entry point
+    /// and this number is expected to sit near the reference's.
+    ///
+    /// `PipelineTokenizer::decode` exists on this rev but is a stub that fails
+    /// loud -- the pipeline decode path is still being built -- so the number
+    /// has to come from the legacy `Tokenizer`: same config, its released
+    /// decode path.
+    ///
+    /// It is loaded here rather than in `build`, and that is deliberate. The
+    /// footprint pass samples the live heap across `build` and never calls
+    /// `decode`, so a second full tokenizer held from `build` would roughly
+    /// double this engine's reported `heap_load_mb` for something the encode
+    /// path does not use. `measure_decode` runs one untimed probe pass over
+    /// every chunk before it starts the clock, so the load lands there and is
+    /// charged to neither number.
+    fn decode(&mut self, ids: &[u32], out: &mut String) -> Result<(), Unsupported> {
+        if self.decoder.is_none() {
+            self.decoder = Some(
+                Tokenizer::from_file(&self.path)
+                    .map_err(|e| Unsupported(format!("tk-encode cannot load this config: {e}")))?,
+            );
+        }
+        let tok = self.decoder.as_ref().expect("loaded just above");
+        match tok.decode(ids, false) {
+            Ok(s) => {
+                out.push_str(&s);
+                Ok(())
+            }
+            Err(e) => unsupported(format!("decode failed: {e}")),
         }
     }
 
