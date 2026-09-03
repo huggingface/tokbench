@@ -1,4 +1,4 @@
-ARG RUST_IMAGE=rust:1.89.0-bookworm
+ARG RUST_IMAGE=rust:1.93.0-bookworm
 ARG UV_IMAGE=ghcr.io/astral-sh/uv:0.8.15
 
 FROM ${UV_IMAGE} AS uv
