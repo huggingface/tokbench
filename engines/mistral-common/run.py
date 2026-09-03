@@ -53,7 +53,9 @@ def main() -> None:
         version=ver,
         lang="python",
         load=load,
-        encode=lambda t, text: t.encode(text, add_bos=False, add_eos=False),
+        # Positional: `Tekkenizer.encode(s, bos, eos)`. Both False, to match
+        # the `add_special_tokens = false` the reference is called with.
+        encode=lambda t, text: t.encode(text, False, False),
         args=args,
     )
 

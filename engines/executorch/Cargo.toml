@@ -5,10 +5,17 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "tokbench engine: ExecuTorch / pytorch-labs C++ tokenizers."
+build = "build.rs"
 
 [dependencies]
 tokbench-core.workspace = true
-# Needs a small C shim over the C++ classes; see src/lib.rs.
+# No FFI crate: the surface is three `extern "C"` functions declared inline in
+# src/lib.rs over shim/shim.cpp. Pulling in bindgen to generate three
+# signatures would add a libclang dependency to the workspace for no benefit.
 
 [build-dependencies]
-# cc = "1"   # enable together with shim.cpp
+# Compiles shim/shim.cpp. Only does anything when
+# scripts/vendor_executorch.sh has been run; otherwise build.rs returns early
+# and the engine reports Unsupported, so `cargo check` on this workspace never
+# requires a C++ toolchain or the vendored tree.
+cc = "1"

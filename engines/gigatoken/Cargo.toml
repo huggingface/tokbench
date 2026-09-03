@@ -11,4 +11,53 @@ tokbench-core.workspace = true
 
 # Not on crates.io — it is a git dependency. Pin a rev, never a branch: a
 # moving baseline makes every historical number in the dashboard a lie.
-# gigatoken = { git = "https://github.com/marcelroed/gigatoken", rev = "<pin-me>" }
+#
+# Renamed on purpose. The package is `gigatoken` but its `[lib] name` is
+# `gigatoken_rs` (the cdylib has to match the Python extension module it is
+# imported as), so the extern name would differ from the package name.
+# Spelling the rename out here means `use gigatoken_rs::...` in src/lib.rs is
+# obviously correct rather than a Cargo coincidence.
+#
+# BUILD REQUIREMENT — two extra flags, every time this feature is on:
+#
+#     cargo +nightly -Z profile-rustflags <cmd> --features gigatoken
+#
+# `+nightly` because gigatoken's `src/lib.rs` opens with
+# `#![feature(portable_simd)]` (its repo pins `rust-toolchain.toml = nightly`,
+# and a git dependency's toolchain file is NOT honoured — rustup resolves from
+# the invocation directory).
+#
+# `-Z profile-rustflags` because gigatoken's manifest sets `rustflags` under
+# `[profile.profiling]`, an unstable Cargo feature. Cargo parses a dependency's
+# whole manifest, so without the flag resolution fails before anything is
+# compiled: "feature `profile-rustflags` is required".
+#
+# See the module docs for the third consequence: pyo3 is non-optional and not
+# in `extension-module` mode, so the driver binary links libpython.
+# COMMENTED OUT BY DEFAULT — not because it fails, but because declaring it at
+# all breaks the workspace for everyone else. Cargo resolves optional
+# dependencies too, and it parses this git dep's manifest during resolution, so
+# on stable `cargo metadata` fails for EVERY package here — core, driver, all
+# fifteen other engines — with "feature `profile-rustflags` is required".
+# Feature-gating does not help; resolution happens before features apply.
+#
+# It works and it is the fastest engine measured: 434-1447 MB/s, ids
+# byte-identical to the reference on all ten corpora, up to 139x. To turn it on,
+# uncomment the line below and use BOTH extra flags plus the cfg:
+#
+#     RUSTFLAGS="--cfg gigatoken_wired" \
+#     cargo +nightly -Z profile-rustflags run --release -p tokbench \
+#           --features gigatoken,hf-tokenizers -- --model gpt2
+#
+#   -Z profile-rustflags  lets Cargo parse the manifest at all.
+#   +nightly              `#![feature(portable_simd)]`; a git dep's
+#                         rust-toolchain.toml does not travel with it, so the
+#                         invocation directory decides. Needs a 2026 nightly;
+#                         a 2025 one is too old.
+#   --cfg gigatoken_wired compiles the adapter in src/lib.rs.
+#
+# The link also pulls libpython (pyo3 is non-optional upstream and not in
+# `extension-module` mode), so the binary hard-codes a path to one specific
+# libpython3.x and is not relocatable. See src/lib.rs.
+#
+# gigatoken_rs = { package = "gigatoken", git = "https://github.com/marcelroed/gigatoken", rev = "34a1599f0c0ae7d7cd0d1c530e6522320158b360" }

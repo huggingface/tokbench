@@ -29,6 +29,8 @@ pub fn native() -> Vec<(&'static str, Ctor)> {
     // reference, so this pairing is a controlled before/after.
     #[cfg(feature = "pipeline")]
     v.push(("pipeline", tokbench_pipeline::Adapter::build as Ctor));
+    #[cfg(feature = "kitoken")]
+    v.push(("kitoken", tokbench_kitoken::Adapter::build as Ctor));
     #[cfg(feature = "fastokens")]
     v.push(("fastokens", tokbench_fastokens::Adapter::build as Ctor));
     #[cfg(feature = "tokie")]

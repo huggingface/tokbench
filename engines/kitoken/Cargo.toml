@@ -1,0 +1,15 @@
+[package]
+name = "tokbench-kitoken"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "tokbench engine: kitoken — BPE, Unigram and WordPiece in one crate."
+
+[dependencies]
+tokbench-core.workspace = true
+
+# Default features already include `convert`, which is what provides
+# `from_tokenizers_file`. Left at defaults rather than hand-picked so the
+# engine is measured in the configuration a user gets from `cargo add kitoken`.
+kitoken = "=0.11.0"

@@ -36,6 +36,13 @@
 //! once through each adapter — and read as "the new engine decodes no faster".
 //! Hence `rev = "..."` in `Cargo.toml` rather than a branch.
 //!
+//! One thing the repin takes away. This adapter used to report a phase
+//! breakdown by timing successive rungs of `encode_generic`'s monomorphised
+//! `STAGE` ladder; rc0 has no such ladder, so `phases()` is gone and this
+//! engine's `breakdown_nanoseconds` is omitted rather than guessed. The
+//! dashboard renders that as "not instrumented", which is the honest reading:
+//! the total is still measured, the split is not.
+//!
 //! ## Why `encode_into`
 //!
 //! `encode_into` is the allocation-free, offset-free path: no `Encoding`, no

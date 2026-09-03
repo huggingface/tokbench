@@ -1,0 +1,11 @@
+{
+  "name": "tokbench-engine-ai-tokenizer",
+  "version": "0.0.0",
+  "private": true,
+  "description": "tokbench adapter for the ai-tokenizer npm package. Run `npm install` here; the Rust driver then invokes run.mjs.",
+  "license": "Apache-2.0",
+  "comment": "Pinned exactly rather than caret-ranged: the benchmark publishes this version as part of the result, so an unattended minor bump would silently change what the number refers to.",
+  "dependencies": {
+    "ai-tokenizer": "1.0.6"
+  }
+}

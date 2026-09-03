@@ -24,6 +24,8 @@ fn engine(model: &Model) -> Option<Result<Box<dyn Engine>, Unsupported>> {
     return Some(tokbench_hf_tokenizers::Adapter::build(model));
     #[cfg(feature = "pipeline")]
     return Some(tokbench_pipeline::Adapter::build(model));
+    #[cfg(feature = "kitoken")]
+    return Some(tokbench_kitoken::Adapter::build(model));
     #[cfg(feature = "fastokens")]
     return Some(tokbench_fastokens::Adapter::build(model));
     #[cfg(feature = "tokie")]

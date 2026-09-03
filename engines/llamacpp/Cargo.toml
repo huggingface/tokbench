@@ -5,11 +5,16 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "tokbench engine: llama.cpp's built-in tokenizer (llama_tokenize)."
+build = "build.rs"
 
 [dependencies]
 tokbench-core.workspace = true
 
-# llama-cpp-2 builds all of llama.cpp (and pulls GPU backends unless disabled)
-# for what is, here, one function. A direct bindgen shim over llama.h is the
-# lighter path — see src/lib.rs.
-# llama-cpp-2 = { version = "0.1.154", default-features = false }
+# Only to compile the 40-line C shim in src/shim.c. There is no Rust binding
+# crate here on purpose: `llama-cpp-2` (even with default-features off) vendors
+# and builds all of llama.cpp + ggml from source, which is a multi-minute build
+# of an inference engine for the sake of one tokenizer function. build.rs links
+# an llama.cpp that is already on the machine instead, so this crate compiles in
+# about a second.
+[build-dependencies]
+cc = "1"

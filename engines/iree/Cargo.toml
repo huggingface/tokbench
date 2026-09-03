@@ -5,7 +5,16 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "tokbench engine: IREE's streaming C tokenizer."
+# Links the static library produced by scripts/vendor_iree.sh, if it is there.
+# No-op (and no C toolchain needed) when it is not, so the workspace still
+# builds for anyone who has not vendored IREE.
+build = "build.rs"
 
 [dependencies]
 tokbench-core.workspace = true
-# Wired via a build.rs + bindgen shim over runtime/src/iree/tokenizer.
+
+# No build-dependencies on purpose. The C sources are compiled by
+# scripts/vendor_iree.sh, not by build.rs, so `cargo check` on a fresh clone
+# needs neither the `cc` crate nor a working C compiler. bindgen is likewise
+# avoided: the FFI surface is a dozen functions, hand-transcribed in src/lib.rs
+# from the pinned headers, so the crate does not drag in libclang.
