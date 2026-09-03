@@ -37,6 +37,7 @@ UA = {"User-Agent": "tokbench/0.1 (https://github.com/huggingface/tokbench)"}
 ENGINES = {
     "hf-tokenizers":  ("crates", [("tokenizers", "0.23.1")]),
     "fastokens":      ("crates", [("fastokens", "0.3.1")]),
+    "kitoken":        ("crates", [("kitoken", "0.11.0")]),
     "tokie":          ("crates", [("tokie", "0.1.4")]),
     "tiktoken":       ("crates", [("tiktoken-rs", "0.12.0")]),
     "rust-gems-bpe":  ("crates", [("bpe", "0.2.1"), ("bpe-openai", "0.3.0")]),

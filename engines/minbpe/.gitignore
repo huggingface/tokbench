@@ -1,0 +1,11 @@
+# minbpe is not on PyPI and ships no setup.py/pyproject.toml, so there is
+# nothing to pip install -- the package is vendored as a plain checkout and put
+# on sys.path by run.py. Both of these are reproducible, so neither is tracked:
+#
+#   git clone --depth 1 https://github.com/karpathy/minbpe engines/minbpe/src
+#   python3 -m venv engines/minbpe/.venv
+#   engines/minbpe/.venv/bin/pip install regex tiktoken
+#
+# `tokenizers` is additionally needed by make_minbpe_model.py --verify.
+src/
+.venv/

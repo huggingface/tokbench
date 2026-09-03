@@ -1,0 +1,322 @@
+{
+ "pipeline": {
+  "albert": {
+   "heap_encode_mb": 34.31340026855469,
+   "heap_load_mb": 34.08686828613281,
+   "rss_delta_mb": 63.59375,
+   "rss_peak_mb": null
+  },
+  "bert-wiki": {
+   "heap_encode_mb": 2.80224609375,
+   "heap_load_mb": 2.652587890625,
+   "rss_delta_mb": 21.296875,
+   "rss_peak_mb": null
+  },
+  "deepseek-v4": {
+   "heap_encode_mb": 10.040557861328125,
+   "heap_load_mb": 9.875213623046875,
+   "rss_delta_mb": 119.0625,
+   "rss_peak_mb": null
+  },
+  "gpt2": {
+   "heap_encode_mb": 5.56536865234375,
+   "heap_load_mb": 5.3736572265625,
+   "rss_delta_mb": 37.96875,
+   "rss_peak_mb": null
+  },
+  "llama-2": {
+   "heap_encode_mb": 5.1947784423828125,
+   "heap_load_mb": 4.6526641845703125,
+   "rss_delta_mb": 36.953125,
+   "rss_peak_mb": null
+  },
+  "llama-3": {
+   "heap_encode_mb": 15.772140502929688,
+   "heap_load_mb": 15.603988647460938,
+   "rss_delta_mb": 254.984375,
+   "rss_peak_mb": null
+  },
+  "mistral-nemo": {
+   "heap_encode_mb": 14.641220092773438,
+   "heap_load_mb": 14.458297729492188,
+   "rss_delta_mb": 144.34375,
+   "rss_peak_mb": null
+  }
+ },
+ "kitoken": {
+  "albert": {
+   "heap_encode_mb": 5.594635009765625,
+   "heap_load_mb": 5.5499420166015625,
+   "rss_delta_mb": 15.8125,
+   "rss_peak_mb": null
+  },
+  "bert-wiki": {
+   "heap_encode_mb": 5.1700286865234375,
+   "heap_load_mb": 4.8282318115234375,
+   "rss_delta_mb": 13.71875,
+   "rss_peak_mb": null
+  },
+  "deepseek-v4": {
+   "heap_encode_mb": 33.78099060058594,
+   "heap_load_mb": 32.940185546875,
+   "rss_delta_mb": 64.828125,
+   "rss_peak_mb": null
+  },
+  "gpt2": {
+   "heap_encode_mb": 10.972564697265625,
+   "heap_load_mb": 10.653335571289062,
+   "rss_delta_mb": 21.21875,
+   "rss_peak_mb": null
+  },
+  "llama-2": {
+   "heap_encode_mb": 9.86260986328125,
+   "heap_load_mb": 9.83917236328125,
+   "rss_delta_mb": 23.78125,
+   "rss_peak_mb": null
+  },
+  "llama-3": {
+   "heap_encode_mb": 47.86012268066406,
+   "heap_load_mb": 47.51420593261719,
+   "rss_delta_mb": 134.484375,
+   "rss_peak_mb": null
+  },
+  "mistral-nemo": {
+   "heap_encode_mb": 41.38227844238281,
+   "heap_load_mb": 40.76634216308594,
+   "rss_delta_mb": 100.671875,
+   "rss_peak_mb": null
+  }
+ },
+ "hf-tokenizers": {
+  "albert": {
+   "heap_encode_mb": 25.050918579101562,
+   "heap_load_mb": 23.840164184570312,
+   "rss_delta_mb": 41.578125,
+   "rss_peak_mb": null
+  },
+  "bert-wiki": {
+   "heap_encode_mb": 5.6718292236328125,
+   "heap_load_mb": 5.101776123046875,
+   "rss_delta_mb": 16.578125,
+   "rss_peak_mb": null
+  },
+  "deepseek-v4": {
+   "heap_encode_mb": 33.4716796875,
+   "heap_load_mb": 29.553329467773438,
+   "rss_delta_mb": 82.421875,
+   "rss_peak_mb": null
+  },
+  "gpt2": {
+   "heap_encode_mb": 11.71514892578125,
+   "heap_load_mb": 7.829345703125,
+   "rss_delta_mb": 35.859375,
+   "rss_peak_mb": null
+  },
+  "llama-2": {
+   "heap_encode_mb": 7.3839874267578125,
+   "heap_load_mb": 7.322998046875,
+   "rss_delta_mb": 29.0625,
+   "rss_peak_mb": null
+  },
+  "llama-3": {
+   "heap_encode_mb": 32.99208068847656,
+   "heap_load_mb": 29.445938110351562,
+   "rss_delta_mb": 209.6875,
+   "rss_peak_mb": null
+  },
+  "mistral-nemo": {
+   "heap_encode_mb": 49.563568115234375,
+   "heap_load_mb": 45.5130615234375,
+   "rss_delta_mb": 87.90625,
+   "rss_peak_mb": null
+  }
+ },
+ "tokie": {
+  "albert": {
+   "heap_encode_mb": 14.334197998046875,
+   "heap_load_mb": 5.6614990234375,
+   "rss_delta_mb": 29.46875,
+   "rss_peak_mb": null
+  },
+  "bert-wiki": {
+   "heap_encode_mb": 4.73291015625,
+   "heap_load_mb": 4.71337890625,
+   "rss_delta_mb": 17.75,
+   "rss_peak_mb": null
+  },
+  "deepseek-v4": {
+   "heap_encode_mb": 40.40788269042969,
+   "heap_load_mb": 32.38456726074219,
+   "rss_delta_mb": 102.578125,
+   "rss_peak_mb": null
+  },
+  "gpt2": {
+   "heap_encode_mb": 19.954315185546875,
+   "heap_load_mb": 10.930999755859375,
+   "rss_delta_mb": 44.328125,
+   "rss_peak_mb": null
+  },
+  "llama-2": {
+   "heap_encode_mb": 5.2264251708984375,
+   "heap_load_mb": 5.1561126708984375,
+   "rss_delta_mb": 23.984375,
+   "rss_peak_mb": null
+  },
+  "llama-3": {
+   "heap_encode_mb": 20.138137817382812,
+   "heap_load_mb": 20.118606567382812,
+   "rss_delta_mb": 112.4375,
+   "rss_peak_mb": null
+  },
+  "mistral-nemo": {
+   "heap_encode_mb": 20.417251586914062,
+   "heap_load_mb": 20.397720336914062,
+   "rss_delta_mb": 59.265625,
+   "rss_peak_mb": null
+  }
+ },
+ "llamacpp": {
+  "bert-wiki": {
+   "heap_encode_mb": 5.6784210205078125,
+   "heap_load_mb": 3.4870147705078125,
+   "rss_delta_mb": 9.5,
+   "rss_peak_mb": null
+  },
+  "deepseek-v4": {
+   "heap_encode_mb": 29.549880981445312,
+   "heap_load_mb": 26.452545166015625,
+   "rss_delta_mb": 44.375,
+   "rss_peak_mb": null
+  },
+  "gpt2": {
+   "heap_encode_mb": 11.997634887695312,
+   "heap_load_mb": 11.853256225585938,
+   "rss_delta_mb": 18.609375,
+   "rss_peak_mb": null
+  },
+  "llama-2": {
+   "heap_encode_mb": 3.7141265869140625,
+   "heap_load_mb": 3.6281890869140625,
+   "rss_delta_mb": 9.234375,
+   "rss_peak_mb": null
+  },
+  "llama-3": {
+   "heap_encode_mb": 46.10008239746094,
+   "heap_load_mb": 46.03367614746094,
+   "rss_delta_mb": 64.59375,
+   "rss_peak_mb": null
+  },
+  "mistral-nemo": {
+   "heap_encode_mb": 44.94580078125,
+   "heap_load_mb": 41.832672119140625,
+   "rss_delta_mb": 60.65625,
+   "rss_peak_mb": null
+  }
+ },
+ "gigatoken": {
+  "deepseek-v4": {
+   "heap_encode_mb": 68.54631042480469,
+   "heap_load_mb": 67.72651672363281,
+   "rss_delta_mb": 88.875,
+   "rss_peak_mb": null
+  },
+  "gpt2": {
+   "heap_encode_mb": 50.50694274902344,
+   "heap_load_mb": 50.21720886230469,
+   "rss_delta_mb": 42.25,
+   "rss_peak_mb": null
+  },
+  "llama-2": {
+   "heap_encode_mb": 30.965530395507812,
+   "heap_load_mb": 29.32257080078125,
+   "rss_delta_mb": 41.21875,
+   "rss_peak_mb": null
+  },
+  "llama-3": {
+   "heap_encode_mb": 84.07958984375,
+   "heap_load_mb": 83.79110717773438,
+   "rss_delta_mb": 113.25,
+   "rss_peak_mb": null
+  },
+  "mistral-nemo": {
+   "heap_encode_mb": 84.92475891113281,
+   "heap_load_mb": 84.09175109863281,
+   "rss_delta_mb": 106.0,
+   "rss_peak_mb": null
+  }
+ },
+ "fastokens": {
+  "deepseek-v4": {
+   "heap_encode_mb": 61.679718017578125,
+   "heap_load_mb": 46.0904541015625,
+   "rss_delta_mb": 150.78125,
+   "rss_peak_mb": null
+  },
+  "llama-2": {
+   "heap_encode_mb": 33.677642822265625,
+   "heap_load_mb": 17.187850952148438,
+   "rss_delta_mb": 47.265625,
+   "rss_peak_mb": null
+  },
+  "llama-3": {
+   "heap_encode_mb": 79.60919189453125,
+   "heap_load_mb": 76.17825317382812,
+   "rss_delta_mb": 219.234375,
+   "rss_peak_mb": null
+  },
+  "mistral-nemo": {
+   "heap_encode_mb": 81.69740295410156,
+   "heap_load_mb": 78.01295471191406,
+   "rss_delta_mb": 160.34375,
+   "rss_peak_mb": null
+  }
+ },
+ "tiktoken": {
+  "gpt2": {
+   "heap_encode_mb": 8.432174682617188,
+   "heap_load_mb": 8.253936767578125,
+   "rss_delta_mb": 12.5,
+   "rss_peak_mb": null
+  },
+  "llama-3": {
+   "heap_encode_mb": 26.387069702148438,
+   "heap_load_mb": 26.147445678710938,
+   "rss_delta_mb": 33.84375,
+   "rss_peak_mb": null
+  },
+  "mistral-nemo": {
+   "heap_encode_mb": 27.020156860351562,
+   "heap_load_mb": 26.610565185546875,
+   "rss_delta_mb": 35.1875,
+   "rss_peak_mb": null
+  }
+ },
+ "wordchipper": {
+  "gpt2": {
+   "heap_encode_mb": 11.5218505859375,
+   "heap_load_mb": 11.5062255859375,
+   "rss_delta_mb": 31.53125,
+   "rss_peak_mb": null
+  },
+  "llama-3": {
+   "heap_encode_mb": 35.93998718261719,
+   "heap_load_mb": 35.92436218261719,
+   "rss_delta_mb": 113.84375,
+   "rss_peak_mb": null
+  },
+  "mistral-nemo": {
+   "heap_encode_mb": 37.467803955078125,
+   "heap_load_mb": 37.062957763671875,
+   "rss_delta_mb": 107.5,
+   "rss_peak_mb": null
+  }
+ },
+ "blingfire": {
+  "gpt2": {
+   "heap_encode_mb": 1.053070068359375,
+   "heap_load_mb": 0.986663818359375,
+   "rss_delta_mb": 1.75,
+   "rss_peak_mb": null
+  }
+ }
+}

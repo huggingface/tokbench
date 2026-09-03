@@ -13,8 +13,12 @@ FIXTURES := $(DATA)/fixtures
 # stay comparable with it.
 FIXTURE_LANGS := amh_Ethi arb_Arab ben_Beng cmn_Hani ell_Grek eng_Latn heb_Hebr \
                  hin_Deva jpn_Jpan kat_Geor kor_Hang rus_Cyrl tam_Taml tha_Thai
-FIXTURE_MODALITIES := agentic_swe code_mixed math_latex
-HF_TEST_REPO := hf-internal-testing/tokenizers-bench
+# Chat/agent traces and special-token-dense text are their own workload: short
+# turns, many added tokens, and a normalizer path most prose never touches.
+FIXTURE_MODALITIES := agentic-traces agentic_swe code_mixed math_latex \
+                      added_special_dense added_special_sparse \
+                      added_normalized_dense added_normalized_sparse
+HF_TEST_REPO := hf-internal-testing/tokenizers-test-data
 
 # One model per archetype: the shapes that stress different parts of a
 # tokenizer (regex-heavy byte-level BPE, normalizer-heavy WordPiece, Unigram).
@@ -43,6 +47,13 @@ fixtures:
 # Fetch each model's tokenizer.json, then derive the per-engine artifacts from
 # it. Deriving rather than downloading separately is deliberate: every engine
 # must be measured on the SAME vocabulary, or the comparison is meaningless.
+# Large realistic fixtures: agent traces with tool calls, code, and mixed
+# scripts — rendered through each model's REAL Jinja chat_template, so the
+# bytes are what a served model actually tokenizes.
+.PHONY: bigfixtures
+bigfixtures:
+	$(PY) scripts/make_fixtures.py 4
+
 .PHONY: models
 models:
 	@mkdir -p $(MODELS)
@@ -79,3 +90,11 @@ test:
 clean:
 	rm -f tokenizer_bench_results.json binary_sizes.json package_sizes.json
 	cargo clean
+
+# Serve the dashboard over http so it can auto-load the results file
+# (a file:// page cannot fetch a sibling file), then open it.
+.PHONY: dash
+dash:
+	@python3 -m http.server 8712 --bind 127.0.0.1 >/dev/null 2>&1 & \
+	 sleep 1; open http://127.0.0.1:8712/dashboard.html; \
+	 echo "serving on http://127.0.0.1:8712/dashboard.html (Ctrl-C the server with: pkill -f 'http.server 8712')"

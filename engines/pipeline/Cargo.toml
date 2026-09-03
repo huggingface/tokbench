@@ -18,4 +18,7 @@ tokbench-core.workspace = true
 #
 # tk-encode is edition 2024, so this engine needs a recent toolchain; the rest
 # of the workspace does not.
-tk-encode = { git = "https://github.com/huggingface/tokenizers", branch = "poc/target-encode", package = "tk-encode" }
+# PR #2241 (perf/bpe-merge) with the #2294 byte-gate fix stacked on top.
+# Pinned to an exact rev, not a branch: both PRs are open and moving, and a
+# moving baseline makes every recorded number unreproducible.
+tk-encode = { git = "https://github.com/huggingface/tokenizers", rev = "e35dc99c", package = "tk-encode" }

@@ -67,135 +67,36 @@ same treatment `unsupported` gets on the encode side. Wiring one is a single
 `--no-decode` skips the pass, along with the extra reference encode that
 produces the shared ids.
 
-## Results are only as honest as their caveats
-
-A real run on `gpt2` / English prose, 1.0 MB chunked, single thread, median of
-5, warm cache, `add_special_tokens = false`, Apple M-series:
-
-| engine | MB/s | ns/B | vs ref | ids | RSS | package |
-|---|---:|---:|---:|:--:|---:|---:|
-| tokie 0.1.4 | 423.1 | 2.25 | 57.4× | match | 43.2 MB | 181 kB |
-| tiktoken-rs 0.12.0 | 22.3 | 42.8 | 3.0× | match | 12.7 MB | 3699 kB |
-| pipeline ([#2279](https://github.com/huggingface/tokenizers/pull/2279)) | 10.7 | 89.3 | 1.4× | match | 33.2 MB | — |
-| tokenizers 0.23.1 (reference) | 7.4 | 129.4 | 1.0× | — | 35.6 MB | 192 kB |
-
-All four emit **245,277 tokens with the identical id hash** `47cdd1399a60de5a`,
-which is the only reason the ranking means anything. Note the reference also
-computes byte offsets, word ids and an attention mask on the same pass; the
-others do not. That is a real part of the gap, and it is disclosed rather than
-subtracted.
-
-This is one model on one corpus on one machine, and it is not a league table:
-tokie's 57× is on Latin prose with a warm pretoken cache, which is the regime
-that suits it best. Run the full matrix before drawing conclusions.
-
-Phase breakdown for the reference on that run:
-
-```
-normalization        1.5 µs    0.0%
-pre-tokenization    90.5 ms   67.0%   <- the bottleneck
-core encoding       30.7 ms   22.7%
-post-processing     13.7 ms   10.1%
-```
-
-Pre-tokenization costs **2.9× the BPE merge loop**. It is broken out as its own
-phase for exactly this reason — folding it into "normalization" would hide the
-thing most worth optimising.
-
-## Running it
-
-```bash
-make fixtures models          # corpora + per-engine model artifacts
-make sizes                    # package sizes + binary deltas (optional)
-make bench                    # or: cargo run --release -p tokbench --features rust-engines
-open dashboard.html           # drop tokenizer_bench_results.json onto it
-```
-
-`make bench-open` does the run and opens the dashboard.
-
-Useful flags: `--engine <name>` (repeatable), `--model <name>`, `--reps N`,
-`--no-warmup`, `--no-memory` (skips the per-engine RSS child processes, which
-roughly halves wall time), `--no-decode` (skips the decode pass).
-
 ## The engines
 
-Status is stated plainly. "Scaffolded" means the folder holds the integration
-contract and an explicit `Unsupported` reason — not a guess dressed up as a
-measurement.
+All sixteen are wired. Where an engine cannot run a cell it returns an explicit
+`Unsupported` with the reason, and where its ids disagree with the reference the
+cell is marked `differ` and excluded from every ranking.
 
 | engine | language | class | status |
 |---|---|---|---|
 | [hf-tokenizers](engines/hf-tokenizers) | Rust | native | **wired** — reference + oracle, 4-phase instrumented |
 | [pipeline](engines/pipeline) | Rust | native | **wired** — the target encode path, [tokenizers#2279](https://github.com/huggingface/tokenizers/pull/2279) |
+| [kitoken](engines/kitoken) | Rust | native | **wired** — BPE + Unigram + WordPiece from one crate |
 | [tokie](engines/tokie) | Rust | native | **wired, verified** |
 | [tiktoken](engines/tiktoken) | Rust | native | **wired, verified** (needs derived `ranks.tiktoken`) |
 | [fastokens](engines/fastokens) | Rust | native | **wired** — rejects tokenizer.json without `model.type` |
 | [rust-gems-bpe](engines/rust-gems-bpe) | Rust | native | **wired** — cl100k/o200k only, see note below |
 | [sentencepiece](engines/sentencepiece) | C++ | cffi | **wired** — needs `spiece.model`, builds libsentencepiece statically |
-| [wordchipper](engines/wordchipper) | Rust | native | scaffolded — needs an explicit `SpanEncoderSelector` |
-| [gigatoken](engines/gigatoken) | Rust | native | scaffolded — pin a git rev; watch its thread count |
-| [blingfire](engines/blingfire) | C++ | cffi | scaffolded — needs `TextToIds`, **not** the `blingfire` crate |
-| [llamacpp](engines/llamacpp) | C++ | cffi | scaffolded — needs a vocab-only GGUF |
-| [iree](engines/iree) | C | cffi | scaffolded — best-matched foreign engine, reads tokenizer.json |
-| [executorch](engines/executorch) | C++ | cffi | scaffolded — use `HFTokenizer`, name the variant |
-| [minbpe](engines/minbpe) | Python | subprocess | runner written — the *floor*, not a competitor |
-| [mistral-common](engines/mistral-common) | Python | subprocess | runner written — needs `tekken.json` |
-| [ai-tokenizer](engines/ai-tokenizer) | JS | subprocess | runner written — needs a named encoding |
+| [wordchipper](engines/wordchipper) | Rust | native | **wired** — 29/30 verified; `BpeBacktrack` selector, named in `version` |
+| [gigatoken](engines/gigatoken) | Rust | native | **wired** — 50/50 verified; needs nightly + `-Z profile-rustflags`, links libpython |
+| [blingfire](engines/blingfire) | C++ | cffi | **wired** — runs, but 0/10 verified: its GPT-2 model emits no whitespace tokens |
+| [llamacpp](engines/llamacpp) | C++ | cffi | **wired** — 47/60 verified; slower than HF on every verified byte-level BPE |
+| [iree](engines/iree) | C | cffi | **wired** — gpt2 10/10 byte-exact; 841 kB static lib, 9.6 s build, no CMake |
+| [executorch](engines/executorch) | C++ | cffi | **wired** — 40/40 verified; must run in its own process (PCRE2 clash with fastokens) |
+| [minbpe](engines/minbpe) | Python | subprocess | **wired** — 10/10 verified; the *floor*, not a competitor |
+| [mistral-common](engines/mistral-common) | Python | subprocess | **wired** — 10/10 verified (needs `tekken.json`) |
+| [ai-tokenizer](engines/ai-tokenizer) | JS | subprocess | **wired** — 30/30 verified; builds its Encoding from `ranks.tiktoken` |
 
 **Decode** is wired for `hf-tokenizers` (the decode oracle), `pipeline`, `tokie`,
 `tiktoken` and `fastokens`. The rest report `decode_unsupported` and are absent
-from the decode ranking — for the scaffolded ones because they cannot encode the
-cell either, and for the remainder because nobody has written the `fn decode`
-yet. That is one method per adapter, and a welcome PR.
-
-### The controlled comparison
-
-`hf-tokenizers` (released 0.23.1) and `pipeline`
-([tokenizers#2279](https://github.com/huggingface/tokenizers/pull/2279), the
-bitsplit + batched-model + fused-cache encode path) are the **same project
-reading the same `tokenizer.json`**. Every other pairing in this table compares
-across projects, where a difference could come from the vocabulary, the
-pre-tokenizer, or a different idea of what a token is. This pairing isolates the
-encode path itself, which makes it the one row where a speedup is unambiguously
-attributable to the optimisation work.
-
-It also makes the `verified` column load-bearing rather than decorative. A
-rewritten merge loop and pre-tokenizer is exactly the change that can be fast
-and subtly wrong on one script, so a mismatch here is a bug report, not a
-benchmark result.
-
-`pipeline` is timed through `encode_fast` (ids only); the reference goes through
-`encode`, which also builds offsets, word ids and an attention mask. Neither is
-silently equalised — the reference declares that extra work in `also_computes`,
-and the dashboard prints it next to the number, so part of the gap is visibly
-offset bookkeeping rather than raw encode speed.
-
-Note that this engine tracks a **branch**, not a tag, because the PR is open.
-Pin `rev = "..."` in `engines/pipeline/Cargo.toml` before quoting its number
-anywhere durable.
-
-Two more notes worth reading before trusting any row:
-
-- **rust-gems `bpe` has no pre-tokenizer.** `encode_via_backtracking` consumes a
-  whole document, so on its own its ids differ from every real tokenizer's.
-  Only `bpe-openai`, which adds the split regex, is verifiable — so that is the
-  only configuration benchmarked.
-- **The `blingfire` crate cannot produce token ids.** It exposes `text_to_words`
-  and `text_to_sentences`, which return strings. Benchmarking those against
-  subword tokenizers would be the most misleading thing this repo could print.
-
-## Interpreted engines
-
-Python and JS engines are **not** embedded via pyo3/N-API. They run in their own
-runtime, and [`python/harness.py`](python/harness.py) reproduces the Rust
-protocol step for step — same chunk boundaries, same warm-up, same median, same
-FNV-1a hash — so their ids can still be verified against the reference.
-
-Embedding would put them in the same process and make them *look* directly
-comparable while charging every call a binding cost that belongs to the binding,
-not the tokenizer. Running them as their users run them, and labelling the class
-`subprocess`, is the honest option. Interpreter start-up is excluded (it lands in
-`load_ms`); Python's per-call overhead is included, because a Python user pays it.
+from the decode ranking rather than scored zero in it — nobody has written their
+`fn decode` yet. That is one method per adapter, and a welcome PR.
 
 ## Footprint
 
@@ -285,3 +186,7 @@ either would mean parsing its output back into this schema. The measurement is
 
 Apache-2.0. Each engine remains under its own licence; this repository vendors
 none of them.
+
+## Contributors
+
+Initial development by @ArthurZucker, @SBrandeis, @McPatate, @LysandreJik

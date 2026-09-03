@@ -1,0 +1,4 @@
+# Built by scripts/vendor_executorch.sh: the pinned pytorch-labs/tokenizers
+# checkout, its five submodules and the CMake build tree. Reproducible from the
+# script, hundreds of MB, and not ours to redistribute.
+/vendor

@@ -1,0 +1,4 @@
+# Fetched and built by scripts/vendor_iree.sh. Reproducible from the pinned
+# commit in that script, so it is not checked in: it is ~11 MB of IREE sources
+# plus ~900 kB of objects and a static archive.
+/vendor/
