@@ -4,18 +4,50 @@ version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "tokbench engine: the HuggingFace target encode path (tokenizers PR #2279, tk-encode)."
+description = "tokbench engine: the HuggingFace rc0 pipeline (tk-encode + tk-serialize, feat/train_encode_split)."
 
 [dependencies]
 tokbench-core.workspace = true
 
-# PR #2279 — "poc(encode): target encode path — bitsplit + batched model +
-# fused cache probe". A BRANCH, not a tag, because the PR is open and still
-# moving. That is a deliberate trade-off: it tracks the work in progress, which
-# is the point of comparing against it, but it also means two runs a week apart
-# are not necessarily measuring the same code. Pin `rev = "..."` before quoting
-# any number from this engine anywhere durable.
+# `feat/train_encode_split` — the 1.0.0-rc.0 line. Pinned by REV, not by branch:
+# the previous pin here was `branch = "poc/target-encode"`, and a branch pin is
+# what let this engine silently keep measuring a decode path that the branch had
+# since replaced. A rev is reproducible, and a stale rev is at least visible.
+#
+# Repinning from the #2279 POC to rc0 is not a version bump, it is a different
+# engine: the legacy `tk_encode::Tokenizer` no longer exists, so the adapter is
+# rewritten around `PipelineTokenizer`. Every number this engine reports —
+# encode as well as decode — is re-baselined by that change.
 #
 # tk-encode is edition 2024, so this engine needs a recent toolchain; the rest
 # of the workspace does not.
-tk-encode = { git = "https://github.com/huggingface/tokenizers", branch = "poc/target-encode", package = "tk-encode" }
+tk-encode = { git = "https://github.com/huggingface/tokenizers", rev = "0743ac07cc2c8f5b890aa8c39c4a5400c32a295d", package = "tk-encode", default-features = false, features = [
+  "normalizers",
+  "unicode-scripts",
+  "bpe",
+  "unigram",
+  "wordpiece",
+  "wordlevel",
+] }
+
+# The reader. rc0 has no `Tokenizer::from_file`: building a `PipelineTokenizer`
+# from a `tokenizer.json` is this crate's whole job, and it links no serde.
+#
+# `parallelism` is deliberately NOT enabled, on either crate. The headline is a
+# single-thread number (fairness rule 5), and `Info::internally_parallel: false`
+# below has to stay true.
+tk-serialize = { git = "https://github.com/huggingface/tokenizers", rev = "0743ac07cc2c8f5b890aa8c39c4a5400c32a295d", package = "tk-serialize", default-features = false, features = [
+  "deserialize",
+  "normalizers",
+  "unicode-scripts",
+  "bpe",
+  "unigram",
+  "wordpiece",
+  "wordlevel",
+] }
+
+# The upgrade pass. Every `tokenizer.json` in `data/models` is still version
+# 1.0, and rc0's reader is canonical-only (`version: "2.0"`) by design, so a
+# legacy config has to go through here first. This is exactly what upstream's
+# own `tk-serialize` benches do, and it runs at load time, outside the timer.
+tk-convert = { git = "https://github.com/huggingface/tokenizers", rev = "0743ac07cc2c8f5b890aa8c39c4a5400c32a295d", package = "tk-convert" }
