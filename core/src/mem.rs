@@ -53,7 +53,7 @@ pub fn live_heap() -> Option<u64> {
             fn mstats() -> Mstats;
         }
         // SAFETY: no arguments, no pointers, returns a plain POD by value.
-        return Some(unsafe { mstats() }.bytes_used as u64);
+        Some(unsafe { mstats() }.bytes_used as u64)
     }
     #[cfg(target_os = "linux")]
     {
@@ -78,7 +78,7 @@ pub fn live_heap() -> Option<u64> {
         }
         // SAFETY: as above.
         let mi = unsafe { mallinfo2() };
-        return Some((mi.uordblks + mi.hblkhd) as u64);
+        Some((mi.uordblks + mi.hblkhd) as u64)
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
