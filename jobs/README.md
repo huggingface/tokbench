@@ -11,20 +11,27 @@ A Jobs hardware flavor specifies allocated resources. It does not promise that
 every Job lands on the same physical CPU model, so do not compare absolute MB/s
 across Jobs without reading each run's `environment-before.json`.
 
-## Build and publish an immutable image
+The `blog-v1` profile also pins the benchmark process to one logical CPU from
+each of eight distinct physical cores. This keeps the 1/2/4/8-thread scaling
+sweep off sibling SMT threads. The selected CPU set and effective task affinity
+are recorded in the environment manifest.
 
-From a clean tokbench checkout:
+## Publish a commit-specific Docker Space
+
+Push the tokbench commit first, then create a private Docker Space from the
+clean checkout. The generated Space recipe pins both base-image digests and
+clones the exact tokbench commit:
 
 ```bash
 revision=$(git rev-parse HEAD)
-docker build -f jobs/Dockerfile \
-  --build-arg TOKBENCH_REVISION="$revision" \
-  -t ghcr.io/huggingface/tokbench:"$revision" .
-docker push ghcr.io/huggingface/tokbench:"$revision"
+python jobs/publish_space.py \
+  --repo-id "$USER/tokbench-jobs-${revision:0:7}"
 ```
 
-Resolve the pushed tag to its registry digest. The submitter rejects mutable
-tags unless `--allow-mutable-image` is passed explicitly.
+The Space is an image builder and host. Benchmarks run on Jobs hardware, not on
+the Space. A commit-specific Space is immutable by convention, so submit it
+with `--allow-mutable-image`; do not update that Space to another tokbench
+commit.
 
 ## Submit
 
@@ -33,7 +40,8 @@ The test-data revision must be a commit SHA, not `main`:
 
 ```bash
 python jobs/submit.py \
-  --image ghcr.io/huggingface/tokbench@sha256:<digest> \
+  --image hf.co/spaces/<user>/tokbench-jobs-<commit> \
+  --allow-mutable-image \
   --input-revision <tokenizers-test-data-commit> \
   --bucket huggingface/tokbench-results
 ```
@@ -44,22 +52,26 @@ Chinese. Use `--models` or `--engines` with comma-separated names for a smaller
 validation run. Jobs default to a 30-minute timeout, so the submitter requests
 six hours.
 
-To reproduce the encode and scaling inputs used by Section 01 of the
-tokenizers v1 blog, select its fixed eight-model matrix. The profile also skips
-decode, which is not an input to those figures:
+To reproduce Section 01 of the tokenizers v1 blog, select its fixed eight-model
+matrix. The profile measures encode, decode, 1/2/4/8-thread scaling on English
+and Chinese, and call-level latency over 1,000 distinct 512-byte English
+documents:
 
 ```bash
 python jobs/submit.py \
   --profile blog-v1 \
-  --image ghcr.io/huggingface/tokbench@sha256:<digest> \
+  --image hf.co/spaces/<user>/tokbench-jobs-<commit> \
+  --allow-mutable-image \
   --input-revision <tokenizers-test-data-commit> \
   --bucket huggingface/tokenizers-v1-benchmarks
 ```
 
-`blog-v1` fixes the models, engines, English/Chinese scaling corpora, and
-eight-thread ceiling. Use the default profile instead when overriding that
-matrix. A model selection controls both the downloaded artifacts and the
-driver filter, so a selected model cannot be silently absent from the Job.
+`blog-v1` fixes the models, the `hf-tokenizers`, `pipeline`, and
+`pipeline-no-cache` engines, English/Chinese scaling corpora, and eight-thread
+ceiling. The third engine is the cache-disabled diagnostic used by Section 02.
+Use the default profile instead when overriding that matrix. A model selection
+controls both the downloaded artifacts and the driver filter, so a selected
+model cannot be silently absent from the Job.
 Add `--dry-run` to print the resolved, non-secret Job configuration without
 submitting or consuming compute.
 

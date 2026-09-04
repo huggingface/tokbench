@@ -18,13 +18,40 @@ models_csv="${TOKBENCH_MODELS:-}"
 engines_csv="${TOKBENCH_ENGINES:-}"
 max_threads="${TOKBENCH_MAX_THREADS:-8}"
 no_decode="${TOKBENCH_NO_DECODE:-0}"
+pin_physical_cores="${TOKBENCH_PIN_PHYSICAL_CORES:-0}"
+latency_csv="${TOKBENCH_LATENCY:-}"
+latency_bytes="${TOKBENCH_LATENCY_BYTES:-512}"
+latency_samples="${TOKBENCH_LATENCY_SAMPLES:-1000}"
 
-for numeric in "${runs}" "${reps}" "${max_threads}"; do
+for numeric in "${runs}" "${reps}" "${max_threads}" "${latency_bytes}" "${latency_samples}"; do
   [[ "${numeric}" =~ ^[1-9][0-9]*$ ]] \
     || { echo "runs, reps and max threads must be positive integers" >&2; exit 2; }
 done
 [[ "${no_decode}" == 0 || "${no_decode}" == 1 ]] \
   || { echo "TOKBENCH_NO_DECODE must be 0 or 1" >&2; exit 2; }
+[[ "${pin_physical_cores}" == 0 || "${pin_physical_cores}" == 1 ]] \
+  || { echo "TOKBENCH_PIN_PHYSICAL_CORES must be 0 or 1" >&2; exit 2; }
+
+# Scaling must not accidentally place two workers on sibling SMT threads.
+# Select one logical CPU for each distinct socket/core pair, restrict the whole
+# process to the requested number of physical cores, then restart so every
+# subsequently-created worker inherits that affinity.
+if [[ "${pin_physical_cores}" == 1 && "${TOKBENCH_AFFINITY_PINNED:-0}" != 1 ]]; then
+  cpuset="$({
+    lscpu -p=CPU,CORE,SOCKET \
+      | awk -F, '!/^#/ { key=$2 "," $3; if (!seen[key]++) print $1 }' \
+      | head -n "${max_threads}"
+  } | paste -sd, -)"
+  cpu_count="$(awk -F, '{ print NF }' <<< "${cpuset}")"
+  [[ -n "${cpuset}" && "${cpu_count}" == "${max_threads}" ]] || {
+    echo "need ${max_threads} distinct physical cores, found ${cpu_count}: ${cpuset}" >&2
+    exit 2
+  }
+  export TOKBENCH_AFFINITY_PINNED=1
+  export TOKBENCH_PINNED_CPUSET="${cpuset}"
+  echo "pinning benchmark to physical-core CPUs: ${cpuset}"
+  exec taskset -c "${cpuset}" bash "$0" "$@"
+fi
 
 split_csv() {
   local value="$1"
@@ -39,6 +66,7 @@ split_csv() {
 split_csv "${models_csv}" model_items
 split_csv "${engines_csv}" engine_items
 split_csv "${scaling_csv}" scaling_items
+split_csv "${latency_csv}" latency_items
 
 python3 jobs/collect_environment.py "${output_dir}/environment-before.json"
 
@@ -57,9 +85,13 @@ find data/models data/fixtures -type f -print0 \
 cargo build --locked --release -p tokbench --features "${features}"
 
 args=(--reps "${reps}" --max-threads "${max_threads}" --no-memory)
+args+=(--latency-bytes "${latency_bytes}" --latency-samples "${latency_samples}")
 [[ "${no_decode}" == 1 ]] && args+=(--no-decode)
 for item in "${scaling_items[@]}"; do
   [[ -n "${item}" ]] && args+=(--scaling "${item}")
+done
+for item in "${latency_items[@]}"; do
+  [[ -n "${item}" ]] && args+=(--latency "${item}")
 done
 for item in "${model_items[@]}"; do
   [[ -n "${item}" ]] && args+=(--model "${item}")

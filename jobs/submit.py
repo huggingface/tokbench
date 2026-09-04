@@ -18,7 +18,9 @@ BLOG_V1_MODELS = (
     "nemotron-3",
     "qwen2",
 )
+BLOG_V1_ENGINES = "hf-tokenizers,pipeline,pipeline-no-cache"
 BLOG_V1_SCALING = "eng_Latn,cmn_Hani"
+BLOG_V1_LATENCY = "eng_Latn"
 
 
 def parse_args() -> argparse.Namespace:
@@ -54,6 +56,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--models", help="Comma-separated model allowlist")
     parser.add_argument("--engines", help="Comma-separated engine allowlist")
     parser.add_argument("--no-decode", action="store_true")
+    parser.add_argument("--latency", help="Comma-separated latency corpora")
+    parser.add_argument("--latency-bytes", type=int, default=512)
+    parser.add_argument("--latency-samples", type=int, default=1_000)
+    parser.add_argument(
+        "--pin-physical-cores",
+        action="store_true",
+        help="Pin the process to one logical CPU per physical core",
+    )
     parser.add_argument(
         "--dry-run",
         action="store_true",
@@ -77,22 +87,25 @@ def resolve_benchmark(args: argparse.Namespace) -> dict[str, str]:
                 ("--models", args.models),
                 ("--engines", args.engines),
                 ("--scaling", args.scaling),
+                ("--latency", args.latency),
             )
             if value is not None
         ]
         if overridden:
             raise SystemExit(
-                "--profile blog-v1 fixes the model, engine and scaling matrix; "
+                "--profile blog-v1 fixes the model, engine, scaling and latency matrix; "
                 f"remove {', '.join(overridden)}"
             )
         if args.max_threads not in (None, 8):
             raise SystemExit("--profile blog-v1 requires --max-threads 8")
         return {
             "models": ",".join(BLOG_V1_MODELS),
-            "engines": "",
+            "engines": BLOG_V1_ENGINES,
             "scaling": BLOG_V1_SCALING,
             "max_threads": "8",
-            "no_decode": "1",
+            "no_decode": "0",
+            "pin_physical_cores": "1",
+            "latency": BLOG_V1_LATENCY,
         }
 
     max_threads = args.max_threads if args.max_threads is not None else 8
@@ -102,14 +115,20 @@ def resolve_benchmark(args: argparse.Namespace) -> dict[str, str]:
         "scaling": args.scaling or BLOG_V1_SCALING,
         "max_threads": str(max_threads),
         "no_decode": "1" if args.no_decode else "0",
+        "pin_physical_cores": "1" if args.pin_physical_cores else "0",
+        "latency": args.latency or "",
     }
 
 
 def main() -> None:
     args = parse_args()
     benchmark = resolve_benchmark(args)
-    if args.runs < 1 or args.reps < 1 or int(benchmark["max_threads"]) < 1:
-        raise SystemExit("--runs, --reps and --max-threads must be positive")
+    if (args.runs < 1 or args.reps < 1 or int(benchmark["max_threads"]) < 1
+            or args.latency_bytes < 1 or args.latency_samples < 1):
+        raise SystemExit(
+            "--runs, --reps, --max-threads, --latency-bytes and "
+            "--latency-samples must be positive"
+        )
     if not args.allow_mutable_image and "@sha256:" not in args.image:
         raise SystemExit(
             "--image must use an immutable @sha256: digest "
@@ -132,6 +151,10 @@ def main() -> None:
         "TOKBENCH_MODELS": benchmark["models"],
         "TOKBENCH_ENGINES": benchmark["engines"],
         "TOKBENCH_NO_DECODE": benchmark["no_decode"],
+        "TOKBENCH_PIN_PHYSICAL_CORES": benchmark["pin_physical_cores"],
+        "TOKBENCH_LATENCY": benchmark["latency"],
+        "TOKBENCH_LATENCY_BYTES": str(args.latency_bytes),
+        "TOKBENCH_LATENCY_SAMPLES": str(args.latency_samples),
     }
     if args.dry_run:
         print(
@@ -178,8 +201,8 @@ def main() -> None:
         env=env,
         secrets=secrets,
         volumes=[Volume(type="bucket", source=args.bucket, mount_path="/outputs")],
-        name="tokbench-reproducible",
         labels={
+            "name": "tokbench-reproducible",
             "project": "tokbench",
             "profile": args.profile,
             "input-revision": args.input_revision[:12],

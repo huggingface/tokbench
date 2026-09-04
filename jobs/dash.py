@@ -63,7 +63,7 @@ def fetch_job(bucket: str, job_id: str, cache_root: Path) -> Path:
     destination.mkdir(parents=True, exist_ok=True)
     uri = f"hf://buckets/{base}/{job_id}"
     print(f"syncing {uri} -> {destination}")
-    sync_bucket(uri, destination)
+    sync_bucket(uri, str(destination))
     verify_artifacts(destination)
     return destination
 

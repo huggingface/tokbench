@@ -74,10 +74,10 @@ pub struct Adapter {
     /// Reused across calls, so the timed loop never grows it — the same
     /// buffer-reuse a real encode loop does, and what `encode_into` is for.
     scratch: Vec<PipelineToken>,
+    cache_enabled: bool,
 }
 
-impl Build for Adapter {
-    fn build(model: &Model) -> Result<Box<dyn Engine>, Unsupported> {
+fn build(model: &Model, cache_enabled: bool) -> Result<Box<dyn Engine>, Unsupported> {
         let path = model.tokenizer_json();
         if !path.exists() {
             return Err(Unsupported("no tokenizer.json".into()));
@@ -88,19 +88,51 @@ impl Build for Adapter {
         // timed region — the same thing upstream's own benches do.
         let canonical = tk_convert::canonicalize_file(&path)
             .map_err(|e| Unsupported(format!("tk-convert cannot upgrade this config: {e}")))?;
+        let canonical = if cache_enabled {
+            canonical
+        } else {
+            let mut value: serde_json::Value = serde_json::from_str(&canonical)
+                .map_err(|e| Unsupported(format!("cannot parse canonical config: {e}")))?;
+            let model = value
+                .get_mut("model")
+                .and_then(serde_json::Value::as_object_mut)
+                .ok_or_else(|| Unsupported("canonical config has no model object".into()))?;
+            model.insert("cache_capacity".into(), serde_json::Value::from(0));
+            serde_json::to_string(&value)
+                .map_err(|e| Unsupported(format!("cannot write no-cache config: {e}")))?
+        };
         let tok = tk_serialize::from_json(&canonical)
             .map_err(|e| Unsupported(format!("tk-serialize cannot read this config: {e}")))?;
         Ok(Box::new(Adapter {
             tok,
             scratch: Vec::new(),
+            cache_enabled,
         }))
+}
+
+impl Build for Adapter {
+    fn build(model: &Model) -> Result<Box<dyn Engine>, Unsupported> {
+        build(model, true)
+    }
+}
+
+/// Diagnostic variant used to isolate the word cache's contribution.
+pub struct NoCacheAdapter;
+
+impl Build for NoCacheAdapter {
+    fn build(model: &Model) -> Result<Box<dyn Engine>, Unsupported> {
+        build(model, false)
     }
 }
 
 impl Engine for Adapter {
     fn info(&self) -> Info {
         Info {
-            name: "pipeline",
+            name: if self.cache_enabled {
+                "pipeline"
+            } else {
+                "pipeline-no-cache"
+            },
             // Not a release: a pinned rev on the rc0 branch. See Cargo.toml.
             version: "tk-encode 1.0.0-rc.0 (tokenizers-rc0 @ 5c3727a9)",
             lang: "rust",

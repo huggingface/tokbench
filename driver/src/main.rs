@@ -25,7 +25,7 @@ use std::time::Instant;
 use anyhow::{bail, Context, Result};
 use clap::Parser;
 use serde::{Deserialize, Serialize};
-use tokbench_core::{chunk, measure, measure_decode, Ids, Model, Phases};
+use tokbench_core::{chunk, measure, measure_decode, measure_latency, Ids, Model, Phases};
 
 /// ~10 kB documents: large enough that per-call overhead is amortised, small
 /// enough to stay in cache. Matches the upstream pipeline benchmark so numbers
@@ -85,6 +85,18 @@ struct Args {
     /// ids, so this also skips the extra reference encode that produces them.
     #[arg(long)]
     no_decode: bool,
+
+    /// Measure call-level encode latency on these corpora (repeatable).
+    #[arg(long = "latency")]
+    latency: Vec<String>,
+
+    /// Maximum bytes in each distinct latency document.
+    #[arg(long, default_value_t = 512)]
+    latency_bytes: usize,
+
+    /// Number of call-level latency samples per engine and cell.
+    #[arg(long, default_value_t = 1_000)]
+    latency_samples: usize,
 
     /// Run the multi-thread scaling sweep on these corpora (repeatable).
     ///
@@ -239,6 +251,36 @@ struct EngineResult {
     /// cell partly measures the engine's memoization; the dashboard flags it.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     reused_text: bool,
+
+    /// Call-level encode latency over distinct documents, when requested.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    latency_p50_us: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    latency_p99_us: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    latency_samples: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    latency_document_bytes: Option<usize>,
+}
+
+fn latency_documents(text: &str, max_bytes: usize, samples: usize) -> Vec<String> {
+    if max_bytes == 0 || samples == 0 {
+        return Vec::new();
+    }
+    let mut documents = Vec::with_capacity(samples + 1);
+    let mut start = 0;
+    while start < text.len() && documents.len() < samples + 1 {
+        let mut end = (start + max_bytes).min(text.len());
+        while end > start && !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        if end == start {
+            break;
+        }
+        documents.push(text[start..end].to_string());
+        start = end;
+    }
+    documents
 }
 
 /// One point on an engine's scaling curve.
@@ -427,6 +469,23 @@ fn main() -> Result<()> {
             let chunks = chunk(&text, CHUNK_BYTES, MAX_CHUNKS);
             let bytes: usize = chunks.iter().map(|c| c.len()).sum();
             let chars: usize = chunks.iter().map(|c| c.chars().count()).sum();
+            let latency_docs = if args.latency.contains(&corpus_name) {
+                let documents = latency_documents(
+                    &text,
+                    args.latency_bytes,
+                    args.latency_samples,
+                );
+                if documents.len() != args.latency_samples + 1 {
+                    bail!(
+                        "{model_name}/{corpus_name}: latency needs {} distinct documents, found {}",
+                        args.latency_samples + 1,
+                        documents.len()
+                    );
+                }
+                documents
+            } else {
+                Vec::new()
+            };
 
             let mut results: Vec<EngineResult> = Vec::new();
 
@@ -518,6 +577,16 @@ fn main() -> Result<()> {
                                 ..Default::default()
                             });
                             continue;
+                        };
+
+                        let latency = if latency_docs.is_empty() {
+                            None
+                        } else {
+                            measure_latency(
+                                engine.as_mut(),
+                                &latency_docs,
+                                args.latency_bytes,
+                            )
                         };
 
                         // Stage breakdown on a separate, untimed pass so the
@@ -639,6 +708,12 @@ fn main() -> Result<()> {
                             decode_unsupported,
                             scaling,
                             reused_text: m.reused,
+                            latency_p50_us: latency.as_ref().map(|value| value.p50_us),
+                            latency_p99_us: latency.as_ref().map(|value| value.p99_us),
+                            latency_samples: latency.as_ref().map(|value| value.samples),
+                            latency_document_bytes: latency
+                                .as_ref()
+                                .map(|value| value.document_bytes),
                             ..Default::default()
                         });
                     }

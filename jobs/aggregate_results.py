@@ -19,6 +19,8 @@ NUMERIC_FIELDS = {
     "heap_encode_mb",
     "heap_load_mb",
     "load_ms",
+    "latency_p50_us",
+    "latency_p99_us",
     "mbps",
     "mean_execution_time_seconds",
     "ns_per_byte",
@@ -157,7 +159,9 @@ def index_report(
 def aggregate_reports(paths: list[Path]) -> dict[str, Any]:
     if not paths:
         raise IncompatibleReports("no reports supplied")
-    sources = [path.name for path in paths]
+    # Keep enough of each path to distinguish reports from separate Jobs.
+    # `run-01.json` alone is ambiguous as soon as host variance is measured.
+    sources = [path.as_posix() for path in paths]
     documents = [json.loads(path.read_text()) for path in paths]
     indexed = [
         index_report(document, source)

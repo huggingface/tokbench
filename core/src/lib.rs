@@ -329,6 +329,15 @@ pub struct DecodeMeasure {
     pub text_hash: u64,
 }
 
+/// Call-by-call encode latency over distinct, fixed-size documents.
+#[derive(Clone, Debug)]
+pub struct LatencyMeasure {
+    pub p50_us: f64,
+    pub p99_us: f64,
+    pub samples: usize,
+    pub document_bytes: usize,
+}
+
 /// Split a corpus into fixed-size chunks on char boundaries.
 ///
 /// ~10 kB is the regime where per-call overhead is amortised but a document
@@ -357,6 +366,45 @@ fn median(mut v: Vec<f64>) -> f64 {
     } else {
         (v[n / 2 - 1] + v[n / 2]) / 2.0
     }
+}
+
+/// Measure one encode call at a time over documents that are each used once.
+///
+/// `documents[0]` warms the engine. Every remaining document contributes one
+/// latency sample, which prevents a document-level cache from turning this
+/// into a lookup benchmark. `document_bytes` is the requested maximum; a
+/// document can be a few bytes shorter when a UTF-8 boundary requires it.
+pub fn measure_latency(
+    engine: &mut dyn Engine,
+    documents: &[String],
+    document_bytes: usize,
+) -> Option<LatencyMeasure> {
+    if documents.len() < 2 || document_bytes == 0 {
+        return None;
+    }
+    let mut out = Ids::with_capacity(document_bytes);
+    engine.encode(&documents[0], &mut out);
+
+    let mut samples = Vec::with_capacity(documents.len() - 1);
+    for document in &documents[1..] {
+        out.clear();
+        let started = Instant::now();
+        engine.encode(document, &mut out);
+        let elapsed_us = started.elapsed().as_secs_f64() * 1e6;
+        std::hint::black_box(&out);
+        samples.push(elapsed_us);
+    }
+    samples.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let percentile = |pct: usize| {
+        let rank = (pct * samples.len()).div_ceil(100).max(1);
+        samples[rank - 1]
+    };
+    Some(LatencyMeasure {
+        p50_us: percentile(50),
+        p99_us: percentile(99),
+        samples: samples.len(),
+        document_bytes,
+    })
 }
 
 /// THE timing loop. Every engine, every language, goes through this function
@@ -890,6 +938,19 @@ mod tests {
         // The hash has to discriminate, or verification is a no-op that
         // passes everything.
         assert_ne!(text_hash("abc"), text_hash("acb"));
+    }
+
+    #[test]
+    fn latency_harness_measures_each_distinct_document_once() {
+        let documents: Vec<String> = (0..101)
+            .map(|index| format!("document {index:03} with distinct text"))
+            .collect();
+        let measured = measure_latency(&mut Bytes, &documents, 512)
+            .expect("one warm-up document and 100 samples");
+        assert_eq!(measured.samples, 100);
+        assert_eq!(measured.document_bytes, 512);
+        assert!(measured.p50_us > 0.0);
+        assert!(measured.p99_us >= measured.p50_us);
     }
 
     /// No document may be encoded twice inside the timed region.

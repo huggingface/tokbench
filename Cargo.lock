@@ -2677,6 +2677,7 @@ dependencies = [
 name = "tokbench-pipeline"
 version = "0.1.0"
 dependencies = [
+ "serde_json",
  "tk-convert",
  "tk-encode",
  "tk-serialize",

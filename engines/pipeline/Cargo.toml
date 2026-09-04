@@ -8,6 +8,7 @@ description = "tokbench engine: the HuggingFace rc0 pipeline (tk-encode + tk-ser
 
 [dependencies]
 tokbench-core.workspace = true
+serde_json.workspace = true
 
 # `tokenizers-rc0` — the 1.0.0-rc.0 line. Pinned by REV, not by branch:
 # the previous pin here was `branch = "poc/target-encode"`, and a branch pin is
