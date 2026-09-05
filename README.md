@@ -69,7 +69,7 @@ produces the shared ids.
 
 ## The engines
 
-All sixteen are wired. Where an engine cannot run a cell it returns an explicit
+All seventeen are wired. Where an engine cannot run a cell it returns an explicit
 `Unsupported` with the reason, and where its ids disagree with the reference the
 cell is marked `differ` and excluded from every ranking.
 
@@ -78,6 +78,7 @@ cell is marked `differ` and excluded from every ranking.
 | [hf-tokenizers](engines/hf-tokenizers) | Rust | native | **wired** — reference + oracle, 4-phase instrumented |
 | [pipeline](engines/pipeline) | Rust | native | **wired** — the rc0 pipeline, [tk-encode 1.0.0-rc.0](https://github.com/huggingface/tokenizers/tree/feat/train_encode_split) |
 | [kitoken](engines/kitoken) | Rust | native | **wired** — BPE + Unigram + WordPiece from one crate |
+| [splintr](engines/splintr) | Rust | native | **wired, verified** — BPE + Unigram + SentencePiece + WordPiece from `tokenizer.json` |
 | [tokie](engines/tokie) | Rust | native | **wired, verified** |
 | [tiktoken](engines/tiktoken) | Rust | native | **wired, verified** (needs derived `ranks.tiktoken`) |
 | [fastokens](engines/fastokens) | Rust | native | **wired** — rejects tokenizer.json without `model.type` |

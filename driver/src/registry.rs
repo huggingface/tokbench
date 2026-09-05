@@ -31,6 +31,8 @@ pub fn native() -> Vec<(&'static str, Ctor)> {
     v.push(("pipeline", tokbench_pipeline::Adapter::build as Ctor));
     #[cfg(feature = "kitoken")]
     v.push(("kitoken", tokbench_kitoken::Adapter::build as Ctor));
+    #[cfg(feature = "splintr")]
+    v.push(("splintr", tokbench_splintr::Adapter::build as Ctor));
     #[cfg(feature = "fastokens")]
     v.push(("fastokens", tokbench_fastokens::Adapter::build as Ctor));
     #[cfg(feature = "tokie")]
