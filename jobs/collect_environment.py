@@ -50,6 +50,8 @@ def main() -> None:
 
     env_names = (
         "ACCELERATOR",
+        "CARGO_BUILD_JOBS",
+        "CARGO_PROFILE_RELEASE_DEBUG",
         "CC",
         "CPU_CORES",
         "CXX",

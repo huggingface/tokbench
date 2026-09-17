@@ -30,11 +30,14 @@ def git(*args: str) -> str:
 def render_dockerfile(revision: str, gigatoken: bool = False) -> str:
     packages = "build-essential ca-certificates clang cmake git jq libssl-dev"
     if gigatoken:
-        packages += " python3-dev"
+        packages += " lld python3-dev"
     prepare = "RUN python3 jobs/prepare_gigatoken.py\n" if gigatoken else ""
     if gigatoken:
-        build = f'''RUN rustup toolchain install {GIGATOKEN_NIGHTLY} --profile minimal \\
-    && RUSTFLAGS="--cfg gigatoken_wired" cargo +{GIGATOKEN_NIGHTLY} \\
+        build = f'''ENV CARGO_BUILD_JOBS=1 \\
+    CARGO_PROFILE_RELEASE_DEBUG=0 \\
+    RUSTFLAGS="--cfg gigatoken_wired -C linker=clang -C link-arg=-fuse-ld=lld"
+RUN rustup toolchain install {GIGATOKEN_NIGHTLY} --profile minimal \\
+    && cargo +{GIGATOKEN_NIGHTLY} \\
       -Z profile-rustflags build --locked --release -p tokbench \\
       --features rust-engines,gigatoken
 ENV TOKBENCH_FEATURES=rust-engines,gigatoken \\

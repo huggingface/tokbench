@@ -103,6 +103,10 @@ class PublishSpaceTests(unittest.TestCase):
         self.assertIn("-Z profile-rustflags", recipe)
         self.assertIn("--features rust-engines,gigatoken", recipe)
         self.assertIn("TOKBENCH_SKIP_BUILD=1", recipe)
+        self.assertIn("CARGO_BUILD_JOBS=1", recipe)
+        self.assertIn("CARGO_PROFILE_RELEASE_DEBUG=0", recipe)
+        self.assertIn("-fuse-ld=lld", recipe)
+        self.assertIn("lld python3-dev", recipe)
         self.assertIn(
             "TOKBENCH_GIGATOKEN_REVISION=34a1599f0c0ae7d7cd0d1c530e6522320158b360",
             recipe,

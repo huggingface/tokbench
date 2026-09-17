@@ -116,7 +116,9 @@ python jobs/submit.py \
 The image recipe runs `jobs/prepare_gigatoken.py` in its disposable checkout.
 That script enables the exact Gigatoken revision recorded in the adapter and
 installs `jobs/Cargo.gigatoken.lock` as the build lockfile. The benchmark Job
-uses that prebuilt binary. Both library profiles use one thread and do not
+uses that prebuilt binary. The image builds one crate at a time and uses LLVM's
+linker to keep the fat-LTO build within the Docker Space builder's memory limit.
+Both library profiles use one thread and do not
 request CPU affinity because they do not run a scaling measurement.
 
 The private `hf-internal-testing/tokenizers-test-data` input requires an HF
