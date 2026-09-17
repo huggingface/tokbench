@@ -659,6 +659,12 @@ pub fn thread_counts() -> Vec<usize> {
     v
 }
 
+fn scaling_chunk_index(unit: usize, chunks: usize) -> usize {
+    let pass = unit / chunks;
+    let position = unit % chunks;
+    (position + pass) % chunks
+}
+
 /// Performance-core count, falling back to total parallelism where the
 /// distinction is unavailable.
 fn perf_cores() -> usize {
@@ -765,6 +771,15 @@ pub fn measure_scaling(
     let total_units = chunks.len() * repeat;
     let total_bytes = bytes * repeat;
 
+    // Rotate the corpus by one document on every repeated pass. With the
+    // previous `i % chunks.len()` mapping, similarly paced workers repeatedly
+    // claimed the same residue classes. For 100 chunks and 8 workers, one
+    // engine could therefore see only 25 chunks however many times the corpus
+    // was repeated. That made each worker's hardware-cache working set shrink
+    // with the thread count and could manufacture superlinear scaling. A
+    // rotation keeps every pass a complete permutation while exposing each
+    // worker to the complete corpus over successive passes.
+
     for &n in counts {
         // Build and warm every engine before the clock starts.
         let mut engines: Vec<Box<dyn Engine>> = Vec::with_capacity(n);
@@ -797,7 +812,7 @@ pub fn measure_scaling(
                                 break;
                             }
                             buf.clear();
-                            e.encode(&chunks[i % chunks.len()], &mut buf);
+                            e.encode(&chunks[scaling_chunk_index(i, chunks.len())], &mut buf);
                             std::hint::black_box(&buf);
                         }
                     });
@@ -1098,6 +1113,28 @@ mod tests {
             vec![1, 2, 4]
         );
         assert!((pts[0].efficiency_pct - 100.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn scaling_rotation_exposes_each_worker_lane_to_every_chunk() {
+        use std::collections::BTreeSet;
+
+        let chunks = 100;
+        let workers = 8;
+        for lane in 0..workers {
+            let seen: BTreeSet<_> = (lane..chunks * chunks)
+                .step_by(workers)
+                .map(|unit| scaling_chunk_index(unit, chunks))
+                .collect();
+            assert_eq!(seen.len(), chunks);
+        }
+
+        for pass in 0..chunks {
+            let seen: BTreeSet<_> = (0..chunks)
+                .map(|position| scaling_chunk_index(pass * chunks + position, chunks))
+                .collect();
+            assert_eq!(seen.len(), chunks);
+        }
     }
 
     /// Chunk boundaries must never split a multi-byte character, or engines

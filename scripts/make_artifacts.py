@@ -15,6 +15,8 @@ than an artifact that is subtly wrong and produces a fast but incorrect result.
 Usage: scripts/make_artifacts.py data/models
 """
 
+from __future__ import annotations
+
 import base64
 import json
 import sys

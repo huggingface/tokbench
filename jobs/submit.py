@@ -19,6 +19,9 @@ BLOG_V1_MODELS = (
     "qwen2",
 )
 BLOG_V1_ENGINES = "hf-tokenizers,pipeline,pipeline-no-cache"
+BLOG_V1_LIBRARY_ENGINES = (
+    "pipeline,kitoken,fastokens,tokie,tiktoken,wordchipper"
+)
 BLOG_V1_SCALING = "eng_Latn,cmn_Hani"
 BLOG_V1_LATENCY = "eng_Latn"
 
@@ -43,9 +46,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--namespace", default=None)
     parser.add_argument(
         "--profile",
-        choices=("default", "blog-v1"),
+        choices=("default", "blog-v1", "blog-v1-libraries"),
         default="default",
-        help="Pinned benchmark matrix; blog-v1 reproduces the blog's Section 01 inputs",
+        help=("Pinned benchmark matrix; blog-v1 reproduces Section 01, while "
+              "blog-v1-libraries runs its encode-only library comparison"),
     )
     parser.add_argument("--flavor", default="cpu-performance")
     parser.add_argument("--timeout", default="6h")
@@ -55,6 +59,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--scaling", help="Comma-separated scaling corpora")
     parser.add_argument("--models", help="Comma-separated model allowlist")
     parser.add_argument("--engines", help="Comma-separated engine allowlist")
+    parser.add_argument(
+        "--measure",
+        choices=("encode", "decode", "latency", "scaling"),
+        help="Run one atomic measurement family instead of the complete suite",
+    )
+    parser.add_argument(
+        "--compare-to",
+        help="Shared comparator for an atomic measurement, for example hf-tokenizers",
+    )
     parser.add_argument("--no-decode", action="store_true")
     parser.add_argument("--latency", help="Comma-separated latency corpora")
     parser.add_argument("--latency-bytes", type=int, default=512)
@@ -80,7 +93,7 @@ def parse_args() -> argparse.Namespace:
 
 def resolve_benchmark(args: argparse.Namespace) -> dict[str, str]:
     """Resolve defaults and reject overrides that would make a named profile ambiguous."""
-    if args.profile == "blog-v1":
+    if args.profile in ("blog-v1", "blog-v1-libraries"):
         overridden = [
             flag
             for flag, value in (
@@ -88,19 +101,35 @@ def resolve_benchmark(args: argparse.Namespace) -> dict[str, str]:
                 ("--engines", args.engines),
                 ("--scaling", args.scaling),
                 ("--latency", args.latency),
+                ("--measure", args.measure),
+                ("--compare-to", args.compare_to),
             )
             if value is not None
         ]
         if overridden:
             raise SystemExit(
-                "--profile blog-v1 fixes the model, engine, scaling and latency matrix; "
+                f"--profile {args.profile} fixes the measurement matrix; "
                 f"remove {', '.join(overridden)}"
             )
         if args.max_threads not in (None, 8):
             raise SystemExit("--profile blog-v1 requires --max-threads 8")
+        if args.profile == "blog-v1-libraries":
+            return {
+                "models": ",".join(BLOG_V1_MODELS),
+                "engines": BLOG_V1_LIBRARY_ENGINES,
+                "measure": "encode",
+                "compare_to": "hf-tokenizers",
+                "scaling": "",
+                "max_threads": "8",
+                "no_decode": "1",
+                "pin_physical_cores": "1",
+                "latency": "",
+            }
         return {
             "models": ",".join(BLOG_V1_MODELS),
             "engines": BLOG_V1_ENGINES,
+            "measure": "",
+            "compare_to": "",
             "scaling": BLOG_V1_SCALING,
             "max_threads": "8",
             "no_decode": "0",
@@ -112,6 +141,8 @@ def resolve_benchmark(args: argparse.Namespace) -> dict[str, str]:
     return {
         "models": args.models or "",
         "engines": args.engines or "",
+        "measure": args.measure or "",
+        "compare_to": args.compare_to or "",
         "scaling": args.scaling or BLOG_V1_SCALING,
         "max_threads": str(max_threads),
         "no_decode": "1" if args.no_decode else "0",
@@ -150,6 +181,8 @@ def main() -> None:
         "TOKBENCH_SCALING_ORDER": "alternating-forward-reverse",
         "TOKBENCH_MODELS": benchmark["models"],
         "TOKBENCH_ENGINES": benchmark["engines"],
+        "TOKBENCH_MEASURE": benchmark["measure"],
+        "TOKBENCH_COMPARE_TO": benchmark["compare_to"],
         "TOKBENCH_NO_DECODE": benchmark["no_decode"],
         "TOKBENCH_PIN_PHYSICAL_CORES": benchmark["pin_physical_cores"],
         "TOKBENCH_LATENCY": benchmark["latency"],

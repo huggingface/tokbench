@@ -72,6 +72,22 @@ ceiling. The third engine is the cache-disabled diagnostic used by Section 02.
 Use the default profile instead when overriding that matrix. A model selection
 controls both the downloaded artifacts and the driver filter, so a selected
 model cannot be silently absent from the Job.
+
+The encode-only comparison against other Rust tokenizer libraries uses the
+same eight models and 22 corpora without running the other measurement
+families:
+
+```bash
+python jobs/submit.py \
+  --profile blog-v1-libraries \
+  --image hf.co/spaces/<user>/tokbench-jobs-<commit> \
+  --allow-mutable-image \
+  --input-revision <tokenizers-test-data-commit> \
+  --bucket huggingface/tokenizers-v1-benchmarks
+```
+
+This runs `measure encode` for pipeline, kitoken, fastokens, tokie, tiktoken
+and wordchipper, all compared with one shared `hf-tokenizers` baseline.
 Add `--dry-run` to print the resolved, non-secret Job configuration without
 submitting or consuming compute.
 

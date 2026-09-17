@@ -49,6 +49,46 @@ tokbench fixes the measurement, not the result:
 
 The contract is written out in full at the top of [`core/src/lib.rs`](core/src/lib.rs).
 
+## Atomic measurements
+
+Use `measure` when one result is needed without running the rest of the
+benchmark matrix. `--engine`, `--model`, and `--corpus` are repeatable; omitting
+one runs every available value in that dimension. Add `--compare-to` to measure
+one shared comparator and report every target engine's speed as a multiplier
+without adding separate comparator rows.
+
+```bash
+cargo run --release -p tokbench --features rust-engines -- \
+  measure encode --engine pipeline --compare-to hf-tokenizers \
+  --model gpt2 --corpus eng_Latn
+cargo run --release -p tokbench --features rust-engines -- \
+  measure decode --engine pipeline --model gpt2 --corpus eng_Latn
+cargo run --release -p tokbench --features rust-engines -- \
+  measure latency --engine pipeline --model gpt2 --corpus eng_Latn
+cargo run --release -p tokbench --features rust-engines -- \
+  measure scaling --engine pipeline --model gpt2 --corpus eng_Latn --max-threads 8
+```
+
+Each command writes the normal tokbench JSON schema. It runs only the requested
+measurement family and skips phase breakdown, decode when it was not requested,
+and the separate memory pass. Interactive runs show one in-place progress bar
+followed by a result table; redirected output omits the progress bar. The
+table keeps one row per model, collapsing multi-corpus runs to medians with a
+completion count. When several target engines are selected,
+each engine becomes a compact column so the model still occupies one row.
+For latency, `--latency-samples` is a maximum: smaller corpora use every
+distinct document they can supply, and the table reports the actual sample
+range.
+Comparison values are medians of matched paired per-corpus ratios. The table
+reports measured and comparable coverage separately. Every raw corpus
+result remains in the JSON. The existing command without `measure` continues
+to run the full benchmark.
+
+Scaling honors `--reps` and uses a one-second single-thread workload by
+default; higher thread counts process the same fixed work. Override the
+calibration with `--scaling-target-ms`. Multi-corpus tables report both the
+median observed efficiency and its corpus range.
+
 ## Hugging Face Jobs
 
 [`jobs/`](jobs/) contains a reproducible cloud runner. It builds tokbench into

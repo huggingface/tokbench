@@ -8,7 +8,12 @@ from pathlib import Path
 from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from submit import BLOG_V1_ENGINES, BLOG_V1_MODELS, resolve_benchmark  # noqa: E402
+from submit import (  # noqa: E402
+    BLOG_V1_ENGINES,
+    BLOG_V1_LIBRARY_ENGINES,
+    BLOG_V1_MODELS,
+    resolve_benchmark,
+)
 from publish_space import render_dockerfile  # noqa: E402
 
 
@@ -17,6 +22,8 @@ def args(**overrides):
         "profile": "default",
         "models": None,
         "engines": None,
+        "measure": None,
+        "compare_to": None,
         "scaling": None,
         "max_threads": None,
         "no_decode": False,
@@ -32,6 +39,8 @@ class SubmitProfileTests(unittest.TestCase):
         config = resolve_benchmark(args(profile="blog-v1"))
         self.assertEqual(config["models"].split(","), list(BLOG_V1_MODELS))
         self.assertEqual(config["engines"], BLOG_V1_ENGINES)
+        self.assertEqual(config["measure"], "")
+        self.assertEqual(config["compare_to"], "")
         self.assertEqual(config["scaling"], "eng_Latn,cmn_Hani")
         self.assertEqual(config["max_threads"], "8")
         self.assertEqual(config["no_decode"], "0")
@@ -39,8 +48,18 @@ class SubmitProfileTests(unittest.TestCase):
         self.assertEqual(config["latency"], "eng_Latn")
 
     def test_blog_profile_rejects_matrix_overrides(self) -> None:
-        with self.assertRaisesRegex(SystemExit, "fixes the model"):
+        with self.assertRaisesRegex(SystemExit, "fixes the measurement matrix"):
             resolve_benchmark(args(profile="blog-v1", models="gpt2"))
+
+    def test_library_profile_is_encode_only_with_one_comparator(self) -> None:
+        config = resolve_benchmark(args(profile="blog-v1-libraries"))
+        self.assertEqual(config["models"].split(","), list(BLOG_V1_MODELS))
+        self.assertEqual(config["engines"], BLOG_V1_LIBRARY_ENGINES)
+        self.assertEqual(config["measure"], "encode")
+        self.assertEqual(config["compare_to"], "hf-tokenizers")
+        self.assertEqual(config["scaling"], "")
+        self.assertEqual(config["latency"], "")
+        self.assertEqual(config["no_decode"], "1")
 
     def test_default_profile_retains_decode_and_custom_selection(self) -> None:
         config = resolve_benchmark(

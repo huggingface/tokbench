@@ -68,11 +68,15 @@ models:
 	@mkdir -p $(MODELS)
 	@for m in $(BENCH_MODELS); do \
 	  [ -f $(MODELS)/$$m/tokenizer.json ] || { echo "fetch model $$m"; \
+	    case "$$m" in \
+	      bert-base-uncased|t5-base) source="$$m.json" ;; \
+	      *) source="models/$$m/tokenizer.json" ;; \
+	    esac; \
 	    mkdir -p $(MODELS)/$$m && \
-	    $(HF) download $(HF_TEST_REPO) models/$$m/tokenizer.json --repo-type dataset \
+	    $(HF) download $(HF_TEST_REPO) "$$source" --repo-type dataset \
 	      $(HF_REVISION_ARG) \
 	      --local-dir $(DATA)/_dl >/dev/null && \
-	    cp $(DATA)/_dl/models/$$m/tokenizer.json $(MODELS)/$$m/ ; } ; \
+	    cp "$(DATA)/_dl/$$source" $(MODELS)/$$m/tokenizer.json ; } ; \
 	done
 	@$(PY) scripts/make_artifacts.py $(MODELS)
 

@@ -16,6 +16,8 @@ features="${TOKBENCH_FEATURES:-rust-engines}"
 scaling_csv="${TOKBENCH_SCALING:-eng_Latn,cmn_Hani}"
 models_csv="${TOKBENCH_MODELS:-}"
 engines_csv="${TOKBENCH_ENGINES:-}"
+measure="${TOKBENCH_MEASURE:-}"
+compare_to="${TOKBENCH_COMPARE_TO:-}"
 max_threads="${TOKBENCH_MAX_THREADS:-8}"
 no_decode="${TOKBENCH_NO_DECODE:-0}"
 pin_physical_cores="${TOKBENCH_PIN_PHYSICAL_CORES:-0}"
@@ -31,6 +33,12 @@ done
   || { echo "TOKBENCH_NO_DECODE must be 0 or 1" >&2; exit 2; }
 [[ "${pin_physical_cores}" == 0 || "${pin_physical_cores}" == 1 ]] \
   || { echo "TOKBENCH_PIN_PHYSICAL_CORES must be 0 or 1" >&2; exit 2; }
+[[ -z "${measure}" || "${measure}" =~ ^(encode|decode|latency|scaling)$ ]] \
+  || { echo "TOKBENCH_MEASURE must be encode, decode, latency or scaling" >&2; exit 2; }
+[[ -z "${compare_to}" || "${compare_to}" =~ ^[A-Za-z0-9._-]+$ ]] \
+  || { echo "invalid TOKBENCH_COMPARE_TO: ${compare_to}" >&2; exit 2; }
+[[ -z "${compare_to}" || -n "${measure}" ]] \
+  || { echo "TOKBENCH_COMPARE_TO requires TOKBENCH_MEASURE" >&2; exit 2; }
 
 # Scaling must not accidentally place two workers on sibling SMT threads.
 # Select one logical CPU for each distinct socket/core pair, restrict the whole
@@ -84,15 +92,24 @@ find data/models data/fixtures -type f -print0 \
 
 cargo build --locked --release -p tokbench --features "${features}"
 
-args=(--reps "${reps}" --max-threads "${max_threads}" --no-memory)
-args+=(--latency-bytes "${latency_bytes}" --latency-samples "${latency_samples}")
-[[ "${no_decode}" == 1 ]] && args+=(--no-decode)
-for item in "${scaling_items[@]}"; do
-  [[ -n "${item}" ]] && args+=(--scaling "${item}")
-done
-for item in "${latency_items[@]}"; do
-  [[ -n "${item}" ]] && args+=(--latency "${item}")
-done
+if [[ -n "${measure}" ]]; then
+  args=(measure "${measure}" --reps "${reps}")
+  [[ -n "${compare_to}" ]] && args+=(--compare-to "${compare_to}")
+  [[ "${measure}" == scaling ]] && args+=(--max-threads "${max_threads}")
+  if [[ "${measure}" == latency ]]; then
+    args+=(--latency-bytes "${latency_bytes}" --latency-samples "${latency_samples}")
+  fi
+else
+  args=(--reps "${reps}" --max-threads "${max_threads}" --no-memory)
+  args+=(--latency-bytes "${latency_bytes}" --latency-samples "${latency_samples}")
+  [[ "${no_decode}" == 1 ]] && args+=(--no-decode)
+  for item in "${scaling_items[@]}"; do
+    [[ -n "${item}" ]] && args+=(--scaling "${item}")
+  done
+  for item in "${latency_items[@]}"; do
+    [[ -n "${item}" ]] && args+=(--latency "${item}")
+  done
+fi
 for item in "${model_items[@]}"; do
   [[ -n "${item}" ]] && args+=(--model "${item}")
 done
@@ -106,7 +123,7 @@ done
 for ((run = 1; run <= runs; run++)); do
   run_id="$(printf '%02d' "${run}")"
   run_args=("${args[@]}")
-  if ((run % 2 == 0)); then
+  if [[ -z "${measure}" || "${measure}" == scaling ]] && ((run % 2 == 0)); then
     run_args+=(--reverse-scaling)
   fi
   printf '%q ' target/release/tokbench "${run_args[@]}" \
@@ -117,9 +134,11 @@ for ((run = 1; run <= runs; run++)); do
     2>&1 | tee "${output_dir}/run-${run_id}.log"
 done
 
-python3 jobs/summarize_scaling.py \
-  "${output_dir}/scaling-summary.json" \
-  "${output_dir}"/run-*.json
+if [[ -z "${measure}" || "${measure}" == scaling ]]; then
+  python3 jobs/summarize_scaling.py \
+    "${output_dir}/scaling-summary.json" \
+    "${output_dir}"/run-*.json
+fi
 python3 jobs/collect_environment.py "${output_dir}/environment-after.json"
 (
   cd "${output_dir}"
