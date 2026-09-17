@@ -1100,6 +1100,11 @@ fn print_measurement_table(
                         if let Some(why) = unsupported {
                             row.push(format!("unsupported: {why}"));
                             row.push("-".into());
+                        } else if comparator
+                            .is_some_and(|other| result.ids_hash != other.ids_hash)
+                        {
+                            row.push("id mismatch".into());
+                            row.push("id mismatch".into());
                         } else {
                             row.push(match (first, other_first) {
                                 (Some(target), Some(baseline)) => {
@@ -1115,10 +1120,12 @@ fn print_measurement_table(
                             });
                         }
                     } else {
-                        row.push(unsupported.map_or_else(
-                            || "ok".into(),
-                            |why| format!("unsupported: {why}"),
-                        ));
+                        row.push(match (unsupported, result.verified) {
+                            (Some(why), _) => format!("unsupported: {why}"),
+                            (None, Some(true)) => "verified".into(),
+                            (None, Some(false)) => "id mismatch".into(),
+                            (None, None) => "unverified".into(),
+                        });
                     }
                 }
             }
@@ -1548,6 +1555,36 @@ fn main() -> Result<()> {
                             None
                         };
 
+                        // A scaling-only run still needs the same correctness
+                        // oracle as encode throughput. This pass is untimed as
+                        // far as the reported scaling points are concerned and
+                        // runs after them, so verification cannot warm or
+                        // otherwise perturb the numbers above.
+                        let scaling_identity = if run_scaling {
+                            let identity =
+                                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                    measure(engine.as_mut(), &chunks, 1, false)
+                                }));
+                            let Ok(value) = identity else {
+                                results.push(EngineResult {
+                                    tokenizer_name: name.to_string(),
+                                    engine_version: info.version.into(),
+                                    engine_lang: info.lang.into(),
+                                    engine_class: info.class.as_str().into(),
+                                    load_ms,
+                                    unsupported: Some(
+                                        "panicked while verifying scaling output".to_string(),
+                                    ),
+                                    ..Default::default()
+                                });
+                                continue;
+                            };
+                            Some(value)
+                        } else {
+                            None
+                        };
+                        let identity = measured.as_ref().or(scaling_identity.as_ref());
+
                         if measurement.is_none() {
                             if let Some(m) = &measured {
                                 let decode_note = match &decoded {
@@ -1591,9 +1628,7 @@ fn main() -> Result<()> {
 
                         results.push(EngineResult {
                             tokenizer_name: name.to_string(),
-                            total_tokens_produced: measured
-                                .as_ref()
-                                .map_or(0, |value| value.tokens),
+                            total_tokens_produced: identity.map_or(0, |value| value.tokens),
                             mean_execution_time_seconds: measured
                                 .as_ref()
                                 .map_or(0.0, |value| value.secs),
@@ -1613,8 +1648,7 @@ fn main() -> Result<()> {
                             ns_per_byte: measured
                                 .as_ref()
                                 .map_or(0.0, |value| value.ns_per_byte),
-                            ids_hash: measured
-                                .as_ref()
+                            ids_hash: identity
                                 .map(|value| format!("{:016x}", value.ids_hash))
                                 .unwrap_or_default(),
                             verified: None,
@@ -1657,7 +1691,7 @@ fn main() -> Result<()> {
             // Verification: the reference's id hash is the oracle. An engine
             // that produced different ids did different work, and its speed
             // is not a comparable number.
-            if run_encode {
+            if run_encode || run_scaling {
                 if let Some(reference) = results
                     .iter()
                     .find(|r| {

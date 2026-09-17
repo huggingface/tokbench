@@ -87,7 +87,9 @@ to run the full benchmark.
 Scaling honors `--reps` and uses a one-second single-thread workload by
 default; higher thread counts process the same fixed work. Override the
 calibration with `--scaling-target-ms`. Multi-corpus tables report both the
-median observed efficiency and its corpus range.
+median observed efficiency and its corpus range. After the timed sweep, an
+untimed encode pass hashes each engine's token IDs against the reference, so a
+scaling-only report carries the same correctness gate as `measure encode`.
 
 ## Hugging Face Jobs
 
