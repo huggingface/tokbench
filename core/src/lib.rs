@@ -659,12 +659,6 @@ pub fn thread_counts() -> Vec<usize> {
     v
 }
 
-fn scaling_chunk_index(unit: usize, chunks: usize) -> usize {
-    let pass = unit / chunks;
-    let position = unit % chunks;
-    (position + pass) % chunks
-}
-
 /// Performance-core count, falling back to total parallelism where the
 /// distinction is unavailable.
 fn perf_cores() -> usize {
@@ -706,123 +700,100 @@ fn perf_cores() -> usize {
 ///   thread busy until the corpus is done, so what is measured is the engine,
 ///   not the partitioning.
 ///
-/// Warm-up runs per thread over the whole corpus, matching what
-/// [`measure`] does for the single-thread case, so the 1-thread point of this
-/// curve is directly comparable with the headline number.
+/// Every repetition builds fresh engine instances. Each instance warms on a
+/// representative slice of the corpus, while the timed region contains only
+/// the disjoint remainder and encodes every measured document once. This is
+/// the same warm-engine, unseen-text workload as [`measure`], and prevents an
+/// engine's exact-input cache from turning corpus replay into apparent
+/// throughput or scaling.
 ///
 /// Engines that parallelise *internally* will show >100% efficiency here,
 /// because they were already using more than one core at "1 thread". That is
 /// why [`Info::internally_parallel`] exists and why the report flags it.
 ///
-/// `target_secs` is how long one timed pass should last; the corpus is walked
-/// as many times as needed to reach it (see below). Pass `0.0` to walk it
-/// exactly once, which is only appropriate for tests.
 pub fn measure_scaling(
     make: &(dyn Fn() -> Option<Box<dyn Engine>> + Sync),
     chunks: &[String],
     counts: &[usize],
     reps: usize,
-    target_secs: f64,
 ) -> Vec<ThreadPoint> {
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Barrier;
 
-    let bytes: usize = chunks.iter().map(|c| c.len()).sum();
+    if chunks.len() < 2 || reps == 0 {
+        return Vec::new();
+    }
+
+    // Spread warm-up throughout the input rather than taking a contiguous
+    // prefix, which could be a single language or source in a mixed corpus.
+    // The two sets remain strictly disjoint.
+    let mut warm_chunks = Vec::new();
+    let mut measured_chunks = Vec::new();
+    for (index, chunk) in chunks.iter().enumerate() {
+        if index % 6 == 0 {
+            warm_chunks.push(chunk);
+        } else {
+            measured_chunks.push(chunk);
+        }
+    }
+    let measured_bytes: usize = measured_chunks.iter().map(|c| c.len()).sum();
     let mut measured: Vec<(usize, f64)> = Vec::new();
 
-    // How many times to walk the corpus inside ONE timed pass.
-    //
-    // Without this the sweep measures thread spawning, not tokenizing. A 200 kB
-    // corpus is ~20 documents; at 14 threads that is 1.4 documents each, and a
-    // fast engine finishes the whole corpus in a few hundred microseconds —
-    // less than it costs to start the threads. The result is an efficiency
-    // figure that collapses toward zero for precisely the fastest engines,
-    // which looks like a damning scaling result and is pure artefact.
-    //
-    // So: time one warm single-thread pass, then repeat the corpus enough times
-    // that the timed region is ~100 ms. Thread start-up becomes noise, and every
-    // thread has real work queued. The corpus is walked in order and each
-    // document is encoded the same number of times by construction, so the
-    // measured throughput still refers to distinct documents rather than one
-    // document replayed out of cache.
-    let repeat = if target_secs <= 0.0 {
-        1
-    } else {
-        let mut probe = match make() {
-            Some(e) => e,
-            None => return Vec::new(),
-        };
-        let mut buf: Ids = Vec::new();
-        for c in chunks {
-            buf.clear();
-            probe.encode(c, &mut buf); // warm
-        }
-        let t = Instant::now();
-        for c in chunks {
-            buf.clear();
-            probe.encode(c, &mut buf);
-        }
-        let one = t.elapsed().as_secs_f64();
-        if one > 0.0 {
-            ((target_secs / one).ceil() as usize).clamp(1, 10_000)
-        } else {
-            1
-        }
-    };
-    let total_units = chunks.len() * repeat;
-    let total_bytes = bytes * repeat;
-
-    // Rotate the corpus by one document on every repeated pass. With the
-    // previous `i % chunks.len()` mapping, similarly paced workers repeatedly
-    // claimed the same residue classes. For 100 chunks and 8 workers, one
-    // engine could therefore see only 25 chunks however many times the corpus
-    // was repeated. That made each worker's hardware-cache working set shrink
-    // with the thread count and could manufacture superlinear scaling. A
-    // rotation keeps every pass a complete permutation while exposing each
-    // worker to the complete corpus over successive passes.
-
     for &n in counts {
-        // Build and warm every engine before the clock starts.
-        let mut engines: Vec<Box<dyn Engine>> = Vec::with_capacity(n);
-        for _ in 0..n {
-            match make() {
-                Some(e) => engines.push(e),
-                None => return Vec::new(),
-            }
-        }
-        for e in engines.iter_mut() {
-            let mut buf: Ids = Vec::new();
-            for c in chunks {
-                buf.clear();
-                e.encode(c, &mut buf);
-            }
-        }
-
         let mut samples = Vec::with_capacity(reps);
         for _ in 0..reps {
+            // A fresh instance per worker and repetition makes every timed
+            // document unseen by that instance. Construction remains outside
+            // the timer, as it is reported separately by the driver.
+            let mut engines: Vec<Box<dyn Engine>> = Vec::with_capacity(n);
+            for _ in 0..n {
+                match make() {
+                    Some(e) => engines.push(e),
+                    None => return Vec::new(),
+                }
+            }
+            for e in engines.iter_mut() {
+                let mut buf: Ids = Vec::new();
+                for c in &warm_chunks {
+                    buf.clear();
+                    e.encode(c, &mut buf);
+                }
+            }
+
             let cursor = AtomicUsize::new(0);
-            let t0 = Instant::now();
-            std::thread::scope(|s| {
+            let start = Barrier::new(n + 1);
+            let done = Barrier::new(n + 1);
+            let elapsed = std::thread::scope(|s| {
                 for e in engines.iter_mut() {
                     let cursor = &cursor;
+                    let start = &start;
+                    let done = &done;
+                    let measured_chunks = &measured_chunks;
                     s.spawn(move || {
                         let mut buf: Ids = Vec::with_capacity(4096);
+                        start.wait();
                         loop {
                             let i = cursor.fetch_add(1, Ordering::Relaxed);
-                            if i >= total_units {
+                            if i >= measured_chunks.len() {
                                 break;
                             }
                             buf.clear();
-                            e.encode(&chunks[scaling_chunk_index(i, chunks.len())], &mut buf);
+                            e.encode(measured_chunks[i], &mut buf);
                             std::hint::black_box(&buf);
                         }
+                        done.wait();
                     });
                 }
+                let t0 = Instant::now();
+                start.wait();
+                done.wait();
+                t0.elapsed().as_secs_f64()
             });
-            samples.push(t0.elapsed().as_secs_f64());
+            samples.push(elapsed);
         }
 
         let secs = median(samples);
-        let mbps = (total_bytes as f64 / (1024.0 * 1024.0)) / secs;
+        let mbps = (measured_bytes as f64 / (1024.0 * 1024.0)) / secs;
         measured.push((n, mbps));
     }
 
@@ -1074,16 +1045,18 @@ mod tests {
         };
 
         SEEN.store(0, Ordering::Relaxed);
-        // target_secs = 0 → walk the corpus exactly once per pass, so the
-        // expected byte count below is exact.
-        let pts = measure_scaling(&make, &chunks, &counts, reps, 0.0);
+        let pts = measure_scaling(&make, &chunks, &counts, reps);
         assert_eq!(pts.len(), counts.len());
 
-        // Warm-up encodes the whole corpus once per engine, and each timed rep
-        // encodes it once in total across all threads. For counts [1,2,4]:
-        // warm-up = (1+2+4) corpora, timed = 3 corpora (one per count).
-        let engines: usize = counts.iter().sum();
-        let expected = total * engines + total * counts.len() * reps;
+        let warm_bytes: usize = chunks
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| index % 6 == 0)
+            .map(|(_, chunk)| chunk.len())
+            .sum();
+        let measured_bytes = total - warm_bytes;
+        let engines_per_rep: usize = counts.iter().sum();
+        let expected = (warm_bytes * engines_per_rep + measured_bytes * counts.len()) * reps;
         assert_eq!(
             SEEN.load(Ordering::Relaxed),
             expected,
@@ -1091,8 +1064,8 @@ mod tests {
         );
         assert_eq!(
             made.load(Ordering::Relaxed),
-            engines,
-            "one engine per thread"
+            engines_per_rep * reps,
+            "one fresh engine per thread and repetition"
         );
 
         // The single-thread point is the baseline, so it is 100% by definition.
@@ -1104,37 +1077,18 @@ mod tests {
 
     #[test]
     fn scaling_can_be_measured_in_reverse_but_is_reported_in_order() {
-        let chunks = vec!["some representative text".repeat(100)];
+        let chunks = vec![
+            "synthetic unit-test warm-up chunk".repeat(100),
+            "synthetic unit-test measured chunk".repeat(100),
+        ];
         let make = || Some(Box::new(Bytes) as Box<dyn Engine>);
-        let pts = measure_scaling(&make, &chunks, &[4, 2, 1], 1, 0.0);
+        let pts = measure_scaling(&make, &chunks, &[4, 2, 1], 1);
 
         assert_eq!(
             pts.iter().map(|point| point.threads).collect::<Vec<_>>(),
             vec![1, 2, 4]
         );
         assert!((pts[0].efficiency_pct - 100.0).abs() < 1e-6);
-    }
-
-    #[test]
-    fn scaling_rotation_exposes_each_worker_lane_to_every_chunk() {
-        use std::collections::BTreeSet;
-
-        let chunks = 100;
-        let workers = 8;
-        for lane in 0..workers {
-            let seen: BTreeSet<_> = (lane..chunks * chunks)
-                .step_by(workers)
-                .map(|unit| scaling_chunk_index(unit, chunks))
-                .collect();
-            assert_eq!(seen.len(), chunks);
-        }
-
-        for pass in 0..chunks {
-            let seen: BTreeSet<_> = (0..chunks)
-                .map(|position| scaling_chunk_index(pass * chunks + position, chunks))
-                .collect();
-            assert_eq!(seen.len(), chunks);
-        }
     }
 
     /// Chunk boundaries must never split a multi-byte character, or engines

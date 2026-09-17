@@ -81,7 +81,8 @@ struct Args {
     #[arg(long, global = true)]
     no_warmup: bool,
 
-    /// Only run these engines (repeatable). Default: everything compiled in.
+    /// Only run these engines (repeatable). Use `all`, or omit, for everything
+    /// compiled in that supports the selected measurement.
     #[arg(long, global = true)]
     engine: Vec<String>,
 
@@ -147,11 +148,6 @@ struct Args {
     /// a fixed core count such as 8.
     #[arg(long, global = true)]
     max_threads: Option<NonZeroUsize>,
-
-    /// Approximate duration of the one-thread workload used by each scaling pass.
-    /// Higher thread counts run the same fixed work and therefore finish sooner.
-    #[arg(long, default_value_t = 1_000, global = true)]
-    scaling_target_ms: u64,
 
     /// Measure scaling points from the highest thread count down to one.
     /// Jobs alternate this with the default order to expose temporal drift.
@@ -1222,10 +1218,16 @@ fn main() -> Result<()> {
         .map(|(name, _)| *name)
         .chain(scripted.iter().map(|(name, _)| *name))
         .collect();
+    let all_engines = args.engine.iter().any(|requested| requested == "all");
+    if all_engines && args.engine.len() != 1 {
+        bail!("--engine all cannot be combined with another --engine value");
+    }
     if let Some(unknown) = args
         .engine
         .iter()
-        .find(|requested| !known_engines.contains(&requested.as_str()))
+        .find(|requested| {
+            requested.as_str() != "all" && !known_engines.contains(&requested.as_str())
+        })
     {
         bail!(
             "engine {unknown} is not compiled in; available engines: {}",
@@ -1277,6 +1279,7 @@ fn main() -> Result<()> {
     }
     let want = |n: &str| {
         args.engine.is_empty()
+            || all_engines
             || args.engine.iter().any(|engine| engine == n)
             || args.compare_to.as_deref() == Some(n)
     };
@@ -1295,10 +1298,9 @@ fn main() -> Result<()> {
         Some(MeasureCommand::Latency) => {
             format!("up to {} distinct samples each", args.latency_samples)
         }
-        Some(MeasureCommand::Scaling) => format!(
-            "thread counts {thread_sweep:?}, {} reps, {} ms 1T target",
-            args.reps, args.scaling_target_ms
-        ),
+        Some(MeasureCommand::Scaling) => {
+            format!("thread counts {thread_sweep:?}, {} reps", args.reps)
+        }
         _ => format!("{} reps each", args.reps),
     };
     if let Some(measurement) = measurement {
@@ -1355,6 +1357,14 @@ fn main() -> Result<()> {
             let chunks = chunk(&text, CHUNK_BYTES, MAX_CHUNKS);
             let bytes: usize = chunks.iter().map(|c| c.len()).sum();
             let chars: usize = chunks.iter().map(|c| c.chars().count()).sum();
+            let measure_scaling_for_corpus = run_scaling
+                || (measurement.is_none() && args.scaling.contains(&corpus_name));
+            // Scaling needs enough unique input to keep all workers busy
+            // without replay. Keep this separate from `chunks` so adding a
+            // scaling sweep to the legacy full run cannot silently change its
+            // ordinary encode workload.
+            let scaling_chunks = measure_scaling_for_corpus
+                .then(|| chunk(&text, CHUNK_BYTES, usize::MAX));
             let measure_latency_here = run_latency
                 || (measurement.is_none() && args.latency.contains(&corpus_name));
             let latency_docs = if measure_latency_here {
@@ -1516,22 +1526,14 @@ fn main() -> Result<()> {
                         // Multi-thread sweep, only on the corpora asked for.
                         // Runs after the single-thread timing so it can never
                         // perturb the headline number.
-                        let measure_scaling_here = run_scaling
-                            || (measurement.is_none() && args.scaling.contains(&corpus_name));
-                        let scaling = if measure_scaling_here {
+                        let scaling = if let Some(scaling_chunks) = &scaling_chunks {
                             let make = || ctor(&model).ok();
-                            let pts =
-                                // 100 ms per timed pass: long enough that thread
-                                // start-up is noise even for the fastest
-                                // engines, which would otherwise finish a small
-                                // corpus before the threads were even up.
-                                tokbench_core::measure_scaling(
-                                    &make,
-                                    &chunks,
-                                    &thread_sweep,
-                                    args.reps,
-                                    args.scaling_target_ms as f64 / 1_000.0,
-                                );
+                            let pts = tokbench_core::measure_scaling(
+                                &make,
+                                scaling_chunks,
+                                &thread_sweep,
+                                args.reps,
+                            );
                             if measurement.is_none() && !pts.is_empty() {
                                 let best = pts
                                     .iter()
@@ -2102,6 +2104,22 @@ mod tests {
     }
 
     #[test]
+    fn parses_all_engines_selector() {
+        let args = Args::try_parse_from([
+            "tokbench",
+            "measure",
+            "encode",
+            "--engine",
+            "all",
+        ])
+        .unwrap();
+
+        assert_eq!(args.engine, ["all"]);
+        assert!(args.model.is_empty());
+        assert!(args.corpus.is_empty());
+    }
+
+    #[test]
     fn parses_scaling_measurement_controls() {
         let args = Args::try_parse_from([
             "tokbench",
@@ -2111,13 +2129,10 @@ mod tests {
             "pipeline",
             "--reps",
             "7",
-            "--scaling-target-ms",
-            "1000",
         ])
         .unwrap();
 
         assert_eq!(args.reps, 7);
-        assert_eq!(args.scaling_target_ms, 1_000);
     }
 
     #[test]

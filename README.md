@@ -53,14 +53,14 @@ The contract is written out in full at the top of [`core/src/lib.rs`](core/src/l
 
 Use `measure` when one result is needed without running the rest of the
 benchmark matrix. `--engine`, `--model`, and `--corpus` are repeatable; omitting
-one runs every available value in that dimension. Add `--compare-to` to measure
+one runs every available value in that dimension. `--engine all` is the explicit
+form of omitting `--engine`. Add `--compare-to` to measure
 one shared comparator and report every target engine's speed as a multiplier
 without adding separate comparator rows.
 
 ```bash
 cargo run --release -p tokbench --features rust-engines -- \
-  measure encode --engine pipeline --compare-to hf-tokenizers \
-  --model gpt2 --corpus eng_Latn
+  measure encode --engine all
 cargo run --release -p tokbench --features rust-engines -- \
   measure decode --engine pipeline --model gpt2 --corpus eng_Latn
 cargo run --release -p tokbench --features rust-engines -- \
@@ -84,12 +84,14 @@ reports measured and comparable coverage separately. Every raw corpus
 result remains in the JSON. The existing command without `measure` continues
 to run the full benchmark.
 
-Scaling honors `--reps` and uses a one-second single-thread workload by
-default; higher thread counts process the same fixed work. Override the
-calibration with `--scaling-target-ms`. Multi-corpus tables report both the
-median observed efficiency and its corpus range. After the timed sweep, an
-untimed encode pass hashes each engine's token IDs against the reference, so a
-scaling-only report carries the same correctness gate as `measure encode`.
+Scaling honors `--reps` and consumes the full corpus. Every repetition creates
+fresh per-thread engine instances, warms them on a representative input slice,
+then times each document in the disjoint remainder exactly once. Start and end
+barriers exclude thread-creation and teardown time. Multi-corpus tables report
+both the median observed efficiency and its corpus range. After the timed
+sweep, an untimed encode pass hashes each engine's token IDs against the
+reference, so a scaling-only report carries the same correctness gate as
+`measure encode`.
 
 ## Hugging Face Jobs
 
