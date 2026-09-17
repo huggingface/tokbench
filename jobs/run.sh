@@ -103,9 +103,17 @@ fi
 if [[ -n "${measure}" ]]; then
   args=(measure "${measure}" --reps "${reps}")
   [[ -n "${compare_to}" ]] && args+=(--compare-to "${compare_to}")
-  [[ "${measure}" == scaling ]] && args+=(--max-threads "${max_threads}")
+  if [[ "${measure}" == scaling ]]; then
+    args+=(--max-threads "${max_threads}")
+    for item in "${scaling_items[@]}"; do
+      [[ -n "${item}" ]] && args+=(--corpus "${item}")
+    done
+  fi
   if [[ "${measure}" == latency ]]; then
     args+=(--latency-bytes "${latency_bytes}" --latency-samples "${latency_samples}")
+    for item in "${latency_items[@]}"; do
+      [[ -n "${item}" ]] && args+=(--corpus "${item}")
+    done
   fi
 else
   args=(--reps "${reps}" --max-threads "${max_threads}" --no-memory)
