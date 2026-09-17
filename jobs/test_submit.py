@@ -10,6 +10,7 @@ from types import SimpleNamespace
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from submit import (  # noqa: E402
     BLOG_V1_ENGINES,
+    BLOG_V1_GIGATOKEN_LIBRARY_ENGINES,
     BLOG_V1_LIBRARY_ENGINES,
     BLOG_V1_MODELS,
     resolve_benchmark,
@@ -60,6 +61,16 @@ class SubmitProfileTests(unittest.TestCase):
         self.assertEqual(config["scaling"], "")
         self.assertEqual(config["latency"], "")
         self.assertEqual(config["no_decode"], "1")
+        self.assertEqual(config["max_threads"], "1")
+        self.assertEqual(config["pin_physical_cores"], "0")
+
+    def test_gigatoken_library_profile_adds_gigatoken(self) -> None:
+        config = resolve_benchmark(args(profile="blog-v1-libraries-gigatoken"))
+        self.assertEqual(config["engines"], BLOG_V1_GIGATOKEN_LIBRARY_ENGINES)
+        self.assertEqual(config["measure"], "encode")
+        self.assertEqual(config["compare_to"], "hf-tokenizers")
+        self.assertEqual(config["max_threads"], "1")
+        self.assertEqual(config["pin_physical_cores"], "0")
 
     def test_default_profile_retains_decode_and_custom_selection(self) -> None:
         config = resolve_benchmark(
@@ -84,6 +95,19 @@ class PublishSpaceTests(unittest.TestCase):
         self.assertGreaterEqual(recipe.count(revision), 3)
         self.assertIn("rust:1.93.0-bookworm@sha256:", recipe)
         self.assertIn("ghcr.io/astral-sh/uv:0.8.15@sha256:", recipe)
+
+    def test_gigatoken_recipe_uses_pinned_nightly_and_prebuilt_binary(self) -> None:
+        recipe = render_dockerfile("1" * 40, gigatoken=True)
+        self.assertIn("python3 jobs/prepare_gigatoken.py", recipe)
+        self.assertIn("nightly-2026-08-05", recipe)
+        self.assertIn("-Z profile-rustflags", recipe)
+        self.assertIn("--features rust-engines,gigatoken", recipe)
+        self.assertIn("TOKBENCH_SKIP_BUILD=1", recipe)
+        self.assertIn(
+            "TOKBENCH_GIGATOKEN_REVISION=34a1599f0c0ae7d7cd0d1c530e6522320158b360",
+            recipe,
+        )
+        self.assertIn("python3-dev", recipe)
 
 
 if __name__ == "__main__":

@@ -91,6 +91,34 @@ and wordchipper, all compared with one shared `hf-tokenizers` baseline.
 Add `--dry-run` to print the resolved, non-secret Job configuration without
 submitting or consuming compute.
 
+Gigatoken requires a nightly Rust toolchain and a different lockfile because
+its upstream manifest uses nightly-only profile rustflags. Build a dedicated
+image after pushing the tokbench commit:
+
+```bash
+revision=$(git rev-parse HEAD)
+python jobs/publish_space.py \
+  --gigatoken \
+  --repo-id "$USER/tokbench-jobs-gigatoken-${revision:0:7}"
+```
+
+Then run the same single-thread comparison with Gigatoken included:
+
+```bash
+python jobs/submit.py \
+  --profile blog-v1-libraries-gigatoken \
+  --image hf.co/spaces/<user>/tokbench-jobs-gigatoken-<commit> \
+  --allow-mutable-image \
+  --input-revision <tokenizers-test-data-commit> \
+  --bucket huggingface/tokenizers-v1-benchmarks
+```
+
+The image recipe runs `jobs/prepare_gigatoken.py` in its disposable checkout.
+That script enables the exact Gigatoken revision recorded in the adapter and
+installs `jobs/Cargo.gigatoken.lock` as the build lockfile. The benchmark Job
+uses that prebuilt binary. Both library profiles use one thread and do not
+request CPU affinity because they do not run a scaling measurement.
+
 The private `hf-internal-testing/tokenizers-test-data` input requires an HF
 token. By default the submitter forwards the locally configured token as an
 encrypted Job secret. It is not written to the environment manifest.

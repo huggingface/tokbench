@@ -13,6 +13,7 @@ mkdir -p "${output_dir}"
 runs="${TOKBENCH_RUNS:-5}"
 reps="${TOKBENCH_REPS:-5}"
 features="${TOKBENCH_FEATURES:-rust-engines}"
+skip_build="${TOKBENCH_SKIP_BUILD:-0}"
 scaling_csv="${TOKBENCH_SCALING:-eng_Latn,cmn_Hani}"
 models_csv="${TOKBENCH_MODELS:-}"
 engines_csv="${TOKBENCH_ENGINES:-}"
@@ -33,6 +34,8 @@ done
   || { echo "TOKBENCH_NO_DECODE must be 0 or 1" >&2; exit 2; }
 [[ "${pin_physical_cores}" == 0 || "${pin_physical_cores}" == 1 ]] \
   || { echo "TOKBENCH_PIN_PHYSICAL_CORES must be 0 or 1" >&2; exit 2; }
+[[ "${skip_build}" == 0 || "${skip_build}" == 1 ]] \
+  || { echo "TOKBENCH_SKIP_BUILD must be 0 or 1" >&2; exit 2; }
 [[ -z "${measure}" || "${measure}" =~ ^(encode|decode|latency|scaling)$ ]] \
   || { echo "TOKBENCH_MEASURE must be encode, decode, latency or scaling" >&2; exit 2; }
 [[ -z "${compare_to}" || "${compare_to}" =~ ^[A-Za-z0-9._-]+$ ]] \
@@ -90,7 +93,12 @@ find data/models data/fixtures -type f -print0 \
   | sort -z \
   | xargs -0 sha256sum > "${output_dir}/input-sha256.txt"
 
-cargo build --locked --release -p tokbench --features "${features}"
+if [[ "${skip_build}" == 0 ]]; then
+  cargo build --locked --release -p tokbench --features "${features}"
+else
+  [[ -x target/release/tokbench ]] \
+    || { echo "TOKBENCH_SKIP_BUILD=1 but target/release/tokbench is absent" >&2; exit 2; }
+fi
 
 if [[ -n "${measure}" ]]; then
   args=(measure "${measure}" --reps "${reps}")

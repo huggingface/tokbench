@@ -22,6 +22,9 @@ BLOG_V1_ENGINES = "hf-tokenizers,pipeline,pipeline-no-cache"
 BLOG_V1_LIBRARY_ENGINES = (
     "pipeline,kitoken,fastokens,tokie,tiktoken,wordchipper"
 )
+BLOG_V1_GIGATOKEN_LIBRARY_ENGINES = (
+    "pipeline,gigatoken,kitoken,fastokens,tokie,tiktoken,wordchipper"
+)
 BLOG_V1_SCALING = "eng_Latn,cmn_Hani"
 BLOG_V1_LATENCY = "eng_Latn"
 
@@ -46,10 +49,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--namespace", default=None)
     parser.add_argument(
         "--profile",
-        choices=("default", "blog-v1", "blog-v1-libraries"),
+        choices=(
+            "default",
+            "blog-v1",
+            "blog-v1-libraries",
+            "blog-v1-libraries-gigatoken",
+        ),
         default="default",
         help=("Pinned benchmark matrix; blog-v1 reproduces Section 01, while "
-              "blog-v1-libraries runs its encode-only library comparison"),
+              "the library profiles run its encode-only comparison"),
     )
     parser.add_argument("--flavor", default="cpu-performance")
     parser.add_argument("--timeout", default="6h")
@@ -93,7 +101,12 @@ def parse_args() -> argparse.Namespace:
 
 def resolve_benchmark(args: argparse.Namespace) -> dict[str, str]:
     """Resolve defaults and reject overrides that would make a named profile ambiguous."""
-    if args.profile in ("blog-v1", "blog-v1-libraries"):
+    fixed_profiles = (
+        "blog-v1",
+        "blog-v1-libraries",
+        "blog-v1-libraries-gigatoken",
+    )
+    if args.profile in fixed_profiles:
         overridden = [
             flag
             for flag, value in (
@@ -111,18 +124,29 @@ def resolve_benchmark(args: argparse.Namespace) -> dict[str, str]:
                 f"--profile {args.profile} fixes the measurement matrix; "
                 f"remove {', '.join(overridden)}"
             )
-        if args.max_threads not in (None, 8):
-            raise SystemExit("--profile blog-v1 requires --max-threads 8")
-        if args.profile == "blog-v1-libraries":
+        expected_threads = 8 if args.profile == "blog-v1" else 1
+        if args.max_threads not in (None, expected_threads):
+            raise SystemExit(
+                f"--profile {args.profile} requires --max-threads {expected_threads}"
+            )
+        if args.profile in (
+            "blog-v1-libraries",
+            "blog-v1-libraries-gigatoken",
+        ):
+            engines = (
+                BLOG_V1_GIGATOKEN_LIBRARY_ENGINES
+                if args.profile == "blog-v1-libraries-gigatoken"
+                else BLOG_V1_LIBRARY_ENGINES
+            )
             return {
                 "models": ",".join(BLOG_V1_MODELS),
-                "engines": BLOG_V1_LIBRARY_ENGINES,
+                "engines": engines,
                 "measure": "encode",
                 "compare_to": "hf-tokenizers",
                 "scaling": "",
-                "max_threads": "8",
+                "max_threads": "1",
                 "no_decode": "1",
-                "pin_physical_cores": "1",
+                "pin_physical_cores": "0",
                 "latency": "",
             }
         return {

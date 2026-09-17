@@ -17,6 +17,7 @@ RUST_IMAGE = (
     "sha256:d0a4aa3ca2e1088ac0c81690914a0d810f2eee188197034edf366ed010a2b382"
 )
 HUB_VERSION = "1.29.0rc1"
+GIGATOKEN_NIGHTLY = "nightly-2026-08-05"
 
 
 def git(*args: str) -> str:
@@ -26,7 +27,23 @@ def git(*args: str) -> str:
     return result.stdout.strip()
 
 
-def render_dockerfile(revision: str) -> str:
+def render_dockerfile(revision: str, gigatoken: bool = False) -> str:
+    packages = "build-essential ca-certificates clang cmake git jq libssl-dev"
+    if gigatoken:
+        packages += " python3-dev"
+    prepare = "RUN python3 jobs/prepare_gigatoken.py\n" if gigatoken else ""
+    if gigatoken:
+        build = f'''RUN rustup toolchain install {GIGATOKEN_NIGHTLY} --profile minimal \\
+    && RUSTFLAGS="--cfg gigatoken_wired" cargo +{GIGATOKEN_NIGHTLY} \\
+      -Z profile-rustflags build --locked --release -p tokbench \\
+      --features rust-engines,gigatoken
+ENV TOKBENCH_FEATURES=rust-engines,gigatoken \\
+    TOKBENCH_GIGATOKEN_REVISION=34a1599f0c0ae7d7cd0d1c530e6522320158b360 \\
+    TOKBENCH_RUST_TOOLCHAIN={GIGATOKEN_NIGHTLY} \\
+    TOKBENCH_SKIP_BUILD=1
+'''
+    else:
+        build = "RUN cargo build --locked --release -p tokbench --features rust-engines\n"
     return f"""FROM {UV_IMAGE} AS uv
 FROM {RUST_IMAGE}
 
@@ -36,7 +53,7 @@ ENV TOKBENCH_SOURCE_REVISION={revision} \\
     HF=\"uvx --from huggingface_hub==${{HUGGINGFACE_HUB_VERSION}} hf\"
 
 RUN apt-get update && apt-get install -y --no-install-recommends \\
-      build-essential ca-certificates clang cmake git jq libssl-dev \\
+      {packages} \\
       pkg-config python3 python3-venv util-linux \\
     && rm -rf /var/lib/apt/lists/*
 COPY --from=uv /uv /uvx /usr/local/bin/
@@ -47,7 +64,7 @@ RUN git clone https://github.com/huggingface/tokbench.git \\
     && git checkout --detach {revision} \\
     && test \"$(git rev-parse HEAD)\" = \"{revision}\"
 WORKDIR /workspace/tokbench
-RUN cargo build --locked --release -p tokbench --features rust-engines
+{prepare}{build}
 
 # A Job overrides this command with jobs/run.sh. The server only keeps the
 # backing Space healthy and does not execute benchmarks on Space hardware.
@@ -55,8 +72,9 @@ CMD [\"python3\", \"-m\", \"http.server\", \"7860\"]
 """
 
 
-def render_readme(revision: str) -> str:
+def render_readme(revision: str, gigatoken: bool = False) -> str:
     short = revision[:7]
+    variant = " with Gigatoken" if gigatoken else ""
     return f"""---
 title: tokbench Jobs {short}
 emoji: 🧪
@@ -66,7 +84,7 @@ sdk: docker
 app_port: 7860
 ---
 
-Private, commit-specific Docker image for reproducible tokbench Jobs.
+Private, commit-specific Docker image for reproducible tokbench Jobs{variant}.
 
 Tokbench source: https://github.com/huggingface/tokbench/tree/{revision}
 """
@@ -77,6 +95,11 @@ def main() -> None:
     parser.add_argument("--repo-id", required=True, help="Space ID, for example user/tokbench-jobs-abc1234")
     parser.add_argument("--revision", help="Full tokbench commit SHA; defaults to the clean local HEAD")
     parser.add_argument("--public", action="store_true", help="Create a public Space instead of a private one")
+    parser.add_argument(
+        "--gigatoken",
+        action="store_true",
+        help="Build the pinned Gigatoken adapter with the required nightly toolchain",
+    )
     args = parser.parse_args()
 
     revision = args.revision or git("rev-parse", "HEAD")
@@ -105,11 +128,11 @@ def main() -> None:
         operations=[
             CommitOperationAdd(
                 path_in_repo="Dockerfile",
-                path_or_fileobj=BytesIO(render_dockerfile(revision).encode()),
+                path_or_fileobj=BytesIO(render_dockerfile(revision, args.gigatoken).encode()),
             ),
             CommitOperationAdd(
                 path_in_repo="README.md",
-                path_or_fileobj=BytesIO(render_readme(revision).encode()),
+                path_or_fileobj=BytesIO(render_readme(revision, args.gigatoken).encode()),
             ),
         ],
     )

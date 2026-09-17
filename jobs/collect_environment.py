@@ -22,17 +22,47 @@ def command(*args: str) -> str | None:
     return value or None
 
 
+def mac_hardware() -> str | None:
+    """Return useful Mac hardware fields without device identifiers."""
+    raw = command("system_profiler", "SPHardwareDataType", "-json")
+    if raw is None:
+        return None
+    try:
+        hardware = json.loads(raw)["SPHardwareDataType"][0]
+    except (json.JSONDecodeError, KeyError, IndexError, TypeError):
+        return None
+    allowed = (
+        "machine_name",
+        "machine_model",
+        "chip_type",
+        "number_processors",
+        "physical_memory",
+    )
+    return json.dumps(
+        {key: hardware[key] for key in allowed if key in hardware},
+        sort_keys=True,
+    )
+
+
 def main() -> None:
     if len(sys.argv) != 2:
         raise SystemExit("usage: collect_environment.py OUTPUT.json")
 
     env_names = (
         "ACCELERATOR",
+        "CC",
         "CPU_CORES",
+        "CXX",
         "JOB_ID",
         "MEMORY",
+        "RUSTFLAGS",
         "TOKBENCH_FEATURES",
+        "TOKBENCH_GIGATOKEN_REVISION",
+        "TOKBENCH_RUST_TOOLCHAIN",
+        "TOKBENCH_SKIP_BUILD",
         "TOKBENCH_ENGINES",
+        "TOKBENCH_MEASURE",
+        "TOKBENCH_COMPARE_TO",
         "TOKBENCH_IMAGE",
         "TOKBENCH_INPUT_REVISION",
         "TOKBENCH_LATENCY",
@@ -56,10 +86,22 @@ def main() -> None:
         "python": platform.python_version(),
         "commands": {
             "cargo": command("cargo", "--version"),
-            "cpu": command("lscpu", "--json"),
+            "cc": command(os.environ.get("CC", "cc"), "--version"),
+            "cpu": command("lscpu", "--json") or mac_hardware(),
+            "cxx": command(os.environ.get("CXX", "c++"), "--version"),
             "git": command("git", "rev-parse", "HEAD"),
             "kernel": command("uname", "-a"),
             "rustc": command("rustc", "--version", "--verbose"),
+            "rustc_selected": (
+                command(
+                    "rustc",
+                    f"+{os.environ['TOKBENCH_RUST_TOOLCHAIN']}",
+                    "--version",
+                    "--verbose",
+                )
+                if "TOKBENCH_RUST_TOOLCHAIN" in os.environ
+                else None
+            ),
             "task_affinity": command("taskset", "-pc", str(os.getpid())),
         },
     }
