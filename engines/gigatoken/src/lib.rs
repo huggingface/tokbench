@@ -158,6 +158,20 @@ mod wired {
     }
 
     impl Build for Adapter {
+        /// `ShortPretokenCache` is `pub(crate)` with no capacity or bypass knob,
+        /// and the ~50k vocab seed is applied unconditionally at construction.
+        /// Turning it off needs a patched copy of the crate -- measured that way
+        /// (no-op'd `insert`/`insert_at`/`replace`, table left permanently
+        /// empty) it runs 60 MB/s against 400 cached and 741 primed, a 12.4x
+        /// span. Worth knowing, not shippable.
+        fn build_without_cache(_model: &Model) -> Result<Box<dyn Engine>, Unsupported> {
+            Err(Unsupported(
+                "gigatoken's pretoken cache is pub(crate) with no bypass; disabling it needs a \
+                 patched build of the crate"
+                    .into(),
+            ))
+        }
+
         fn build(model: &Model) -> Result<Box<dyn Engine>, Unsupported> {
             let path = model.tokenizer_json();
             if !path.exists() {

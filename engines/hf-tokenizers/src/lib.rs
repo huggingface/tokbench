@@ -34,6 +34,21 @@ pub struct Adapter {
 }
 
 impl Build for Adapter {
+    /// `BpeBuilder::cache_capacity` exists, but it is builder-only: the field
+    /// is absent from `models/bpe/serialization.rs`, so a `tokenizer.json`
+    /// cannot carry it and `Tokenizer::from_file` -- the only constructor this
+    /// adapter uses -- has no way to pass it. Disabling the cache would mean
+    /// pulling vocab and merges back out of the loaded model and rebuilding
+    /// the BPE through the builder, which is a different construction path
+    /// from the one every other number in this row was measured on.
+    fn build_without_cache(_model: &Model) -> Result<Box<dyn Engine>, Unsupported> {
+        Err(Unsupported(
+            "0.23.1 takes cache_capacity only through BpeBuilder, and the field is not in the \
+             model config, so from_file cannot ask for it"
+                .into(),
+        ))
+    }
+
     fn build(model: &Model) -> Result<Box<dyn Engine>, Unsupported> {
         let path = model.tokenizer_json();
         if !path.exists() {

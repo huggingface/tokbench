@@ -451,11 +451,7 @@ fn compact_duration(seconds: f64) -> String {
 
 fn progress_line(done: usize, total: usize, elapsed_seconds: f64) -> String {
     const WIDTH: usize = 28;
-    let filled = if total == 0 {
-        0
-    } else {
-        WIDTH * done.min(total) / total
-    };
+    let filled = (WIDTH * done.min(total)).checked_div(total).unwrap_or(0);
     let bar = format!("{}{}", "#".repeat(filled), "-".repeat(WIDTH - filled));
     let eta = if done == 0 {
         "calculating".into()
@@ -485,7 +481,7 @@ fn median(mut values: Vec<f64>) -> Option<f64> {
     }
     values.sort_by(|a, b| a.total_cmp(b));
     let middle = values.len() / 2;
-    Some(if values.len() % 2 == 0 {
+    Some(if values.len().is_multiple_of(2) {
         (values[middle - 1] + values[middle]) / 2.0
     } else {
         values[middle]
@@ -506,6 +502,10 @@ fn median_multiplier(values: Vec<f64>, expected: usize) -> String {
 fn format_scaling_efficiency(percent: f64) -> String {
     format!("{:.0}% observed", percent.round())
 }
+
+/// One engine's result for a cell, paired with the comparator's result for the
+/// same cell when `--compare-to` named one.
+type Compared<'a> = (&'a EngineResult, Option<&'a EngineResult>);
 
 /// Padding modes that get their own columns, in order.
 ///
@@ -544,8 +544,7 @@ fn print_collapsed_measurement_table(
     measurement: MeasureCommand,
     compare_to: Option<&str>,
 ) {
-    let mut groups: BTreeMap<(String, String), Vec<(&EngineResult, Option<&EngineResult>)>> =
-        BTreeMap::new();
+    let mut groups: BTreeMap<(String, String), Vec<Compared<'_>>> = BTreeMap::new();
     for run in runs {
         let comparator = compare_to.and_then(|name| {
             run.results
@@ -1282,10 +1281,10 @@ fn print_measurement_table(runs: &[Run], measurement: MeasureCommand, compare_to
 
 fn main() -> Result<()> {
     let args = Args::parse();
-    let measurement = match &args.command {
-        Some(CliCommand::Measure { command }) => Some(*command),
-        None => None,
-    };
+    let measurement = args
+        .command
+        .as_ref()
+        .map(|CliCommand::Measure { command }| *command);
     let run_encode = measurement.is_none() || measurement == Some(MeasureCommand::Encode);
     let run_decode = match measurement {
         Some(command) => command == MeasureCommand::Decode,
@@ -1514,8 +1513,7 @@ fn main() -> Result<()> {
             let measure_latency_here =
                 run_latency || (measurement.is_none() && args.latency.contains(&corpus_name));
             let latency_docs = if measure_latency_here {
-                let documents = latency_documents(&text, args.latency_bytes, args.latency_samples);
-                documents
+                latency_documents(&text, args.latency_bytes, args.latency_samples)
             } else {
                 Vec::new()
             };

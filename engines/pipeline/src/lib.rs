@@ -126,39 +126,20 @@ impl Build for Adapter {
     fn build(model: &Model) -> Result<Box<dyn Engine>, Unsupported> {
         build(model, true)
     }
-}
 
-/// Diagnostic variant meant to isolate the word cache's contribution.
-///
-/// **Currently refuses to run, because it does not work.** It asks for a
-/// cache-free engine by writing `cache_capacity: 0` into the canonical config,
-/// and at the pinned rev `tk-serialize`'s `read_bpe` never reads that field --
-/// it builds `BpeConfig { .., ..BpeConfig::default() }`, so the request is
-/// discarded and the engine comes back with the default 65,536-slot
-/// `WordCache`. This row has therefore been reporting a *cached* engine under
-/// a cache-free name, which is worse than reporting nothing: the whole purpose
-/// of the row is the comparison against `pipeline`, and the two were the same
-/// engine.
-///
-/// Measured, with the capacity forced in from outside instead (gpt2, 14 MB of
-/// deduplicated English, one thread): 172 MB/s with no cache against 260 MB/s
-/// with it. So the row was understating the cache's contribution as 0% when it
-/// is worth about +51%.
-///
-/// To re-enable: bump the `rev` in `Cargo.toml` past the upstream fix that
-/// makes `read_bpe` read `cache_capacity`, then delete this guard and restore
-/// `build(model, false)`. Nothing else here needs to change -- the config
-/// rewrite below is already correct, it was simply being ignored.
-pub struct NoCacheAdapter;
-
-impl Build for NoCacheAdapter {
-    fn build(_model: &Model) -> Result<Box<dyn Engine>, Unsupported> {
-        Err(Unsupported(
-            "cache_capacity is ignored by tk-serialize's read_bpe at the pinned rev, so this \
-             engine cannot actually disable the cache; it would report the cached engine as \
-             cache-free. Bump the rev past the reader fix and remove this guard"
-                .into(),
-        ))
+    /// `cache_capacity: 0` in the canonical config, which the reader now
+    /// honours.
+    ///
+    /// It did not always: `tk-serialize`'s `read_bpe` built `BpeConfig` with
+    /// `..BpeConfig::default()` and never read this field, so the request was
+    /// discarded and this row reported the *cached* engine under a cache-free
+    /// name -- making the word cache look worth 0%. Fixed upstream, and the
+    /// `rev` in `Cargo.toml` is pinned past the fix, so asking works.
+    ///
+    /// Measured contribution once it did work (gpt2, 14 MB of deduplicated
+    /// English, one thread): 172 MB/s with no cache against 260 with it.
+    fn build_without_cache(model: &Model) -> Result<Box<dyn Engine>, Unsupported> {
+        build(model, false)
     }
 }
 

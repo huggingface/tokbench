@@ -322,6 +322,29 @@ pub trait Build {
     fn build(model: &Model) -> Result<Box<dyn Engine>, Unsupported>
     where
         Self: Sized;
+
+    /// The same engine with the library's own caches turned off, when the
+    /// library can be asked for that.
+    ///
+    /// A build-time question, not a setter: a pretoken cache is sized and
+    /// populated when the model is constructed, so there is nothing to toggle
+    /// afterwards. The registry pairs this with [`Build::build`] as a separate
+    /// `<engine>-no-cache` row, which is what makes a cache's contribution
+    /// readable instead of inferred.
+    ///
+    /// The default refuses, and the refusal is the point. Most of these
+    /// libraries expose no way to disable their caches, and a cache-free cell
+    /// filled with a cached number is worse than an absent one: subtracting
+    /// the two rows would report the cache as worth 0%. Engines that can do it
+    /// say how; engines that cannot say why not.
+    fn build_without_cache(_model: &Model) -> Result<Box<dyn Engine>, Unsupported>
+    where
+        Self: Sized,
+    {
+        Err(Unsupported(
+            "this library exposes no way to disable its caches".into(),
+        ))
+    }
 }
 
 /// A deterministic hash of an id stream, used to check that two engines did
