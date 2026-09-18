@@ -39,22 +39,63 @@
 //!
 //! # Fairness
 //!
-//! * **Threads — this row is single-threaded, and that is a deliberate
-//!   choice.** gigatoken has two encode paths. The headline "GB/s" figures
-//!   come from `encode_docs_ragged`/`WorkerPool`, which fans documents (and
-//!   even a single large document, split at pretoken-safe boundaries) across
-//!   rayon; that is a whole-machine number. This adapter calls the *serial*
-//!   per-document path instead — `Tokenizer::encode_with_added_tokens_flat`
-//!   for byte-level BPE, `SentencePieceBPE::encode_raw_cb` for byte-fallback
-//!   models — which is the same code gigatoken's own `encode_st` ("encode,
-//!   single thread") bench measures, and which never touches the rayon pool.
-//!   So `internally_parallel` is `false`, honestly: the number here is a
-//!   one-core number directly comparable with every other row. It is NOT
-//!   gigatoken's advertised throughput, and a writeup quoting it should say
-//!   so — the multi-thread axis is where its batch engine belongs.
-//! * **The pretoken cache** is the main source of the speedup, and it lives
-//!   on the `Tokenizer`/`EncodeState` this struct owns, so it persists across
-//!   `encode` calls. `tokbench_core::measure` walks the whole corpus once
+//! * **Threads — two paths, and both are now measured.** gigatoken has two
+//!   encode paths. `encode` here still calls the *serial* per-document one —
+//!   `Tokenizer::encode_with_added_tokens_flat` for byte-level BPE,
+//!   `SentencePieceBPE::encode_raw_cb` for byte-fallback — which is the same
+//!   code gigatoken's own `encode_st` ("encode, single thread") bench
+//!   measures, and which never touches the rayon pool. That keeps the encode
+//!   row a one-core number directly comparable with every other row.
+//!
+//!   `encode_batch` calls the other one: `encode_docs_ragged` /
+//!   `sp_encode_docs_ragged`, which fan documents (and even a single large
+//!   document, split at pretoken-safe boundaries) across rayon. That is where
+//!   the advertised "GB/s" comes from, and the scaling sweep drives it, so
+//!   `internally_parallel` is now reported from the width actually installed
+//!   rather than hardcoded `false`.
+//!
+//!   One caveat on the 1-thread point of that curve: gigatoken's own serial
+//!   batch path, `encode_docs_ragged_serial`, is not re-exported at the crate
+//!   root, so the adapter cannot reach it. A one-thread rayon pool stands in,
+//!   which pays rayon dispatch the true serial path would not — so the
+//!   1-thread number is, if anything, slightly pessimistic.
+//!
+//! * **The scaling corpus has to be large, or this engine cannot be measured
+//!   at all.** `chunk_target_bytes` floors chunks at `MIN_CHUNK_BYTES` = 1 MiB
+//!   and `encode_chunks_gathered` caps tasks at
+//!   `current_num_threads().min(chunks.len())`. tokbench's ~4.3 MB scaling
+//!   batch is therefore four chunks at *every* thread count, and the curve
+//!   comes out flat — 365, 348, 309, 326 MB/s at 1/2/4/8 threads on
+//!   gpt2/english. That flatness is the corpus, not the engine: on 13 MB of
+//!   distinct English the same build does 378 -> 627 -> 866 MB/s over 1/2/4
+//!   threads. Any engine with a coarse internal chunk floor needs the bigger
+//!   batch before its curve means anything.
+//! * **The pretoken cache is not "the main source of the speedup", it is
+//!   very nearly the whole of it.** Measured three ways on 14 MB of
+//!   deduplicated English (100% unique lines), gpt2, ids verified against
+//!   `tokenizers 0.23.1` in every cell:
+//!
+//!   | cache state | gigatoken 1T | gigatoken 8T | pipeline 1T | pipeline 8T |
+//!   | --- | --- | --- | --- | --- |
+//!   | disabled | 60 | 271 | 260 | 1195 |
+//!   | default (warmed on a disjoint 1/6) | 400 | 783 | 263 | 1364 |
+//!   | primed (every pretoken resident) | 741 | 1910 | 290 | 1651 |
+//!
+//!   gigatoken spans **12.4x** at one thread across those three states; the
+//!   HF pipeline spans **1.1x**. With the cache bypassed gigatoken is 4.3x
+//!   *slower* than the pipeline at one thread; fully primed it is 2.6x
+//!   faster. So a gigatoken number without its cache state stated is not a
+//!   result, and its published figures are primed-cache figures.
+//!
+//!   Part of that gap is structural rather than tuning: gigatoken seeds its
+//!   pretoken cache with ~50k vocab entries at construction (see
+//!   `ShortPretokenCache::with_at_least`), so it starts at a ~99.3% hit rate
+//!   — its merge path is annotated as running on "~0.7% of" pretokens. The
+//!   pipeline's `WordCache` starts empty and defaults to 65,536 slots, which
+//!   cannot even hold english.txt's 105,627 distinct words.
+//!
+//!   The cache lives on the `Tokenizer`/`EncodeState` this struct owns, so it
+//!   persists across `encode` calls. `tokbench_core::measure` walks the whole corpus once
 //!   untimed before the clock starts, so the timed passes always see a warm
 //!   cache — the regime a real `for doc in corpus` loop reaches, and the one
 //!   every number from this engine describes. `--no-warmup` gives the cold
