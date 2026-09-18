@@ -13,7 +13,7 @@
 //! Either way the *encode* path being timed is identical; only build cost
 //! differs, and build cost is excluded from the timed region by design.
 
-use tokbench_core::{unsupported, Build, Class, Engine, Ids, Info, Model, Unsupported};
+use tokbench_core::{unsupported, Build, Class, Engine, Ids, Info, Model, Padding, Unsupported};
 
 pub struct Adapter {
     tok: tokie::Tokenizer,
@@ -54,6 +54,47 @@ impl Engine for Adapter {
         // would additionally build an Encoding with offsets the reference is
         // not being charged for here.
         out.extend_from_slice(&self.tok.encode_ids(text, false));
+    }
+
+    /// `Tokenizer::encode_batch` fans out over its own stolen batches, so this
+    /// engine must never be threaded from outside.
+    fn has_native_batch(&self) -> bool {
+        true
+    }
+
+    /// Always false, and that is a property of the library rather than a gap
+    /// in this adapter: `encode_batch` reads its width from
+    /// `thread::available_parallelism()` directly and exposes no knob, so
+    /// there is no honest way to answer "use exactly n threads".
+    ///
+    /// Refusing here is what routes this engine to a single measurement at its
+    /// own chosen width. Accepting and ignoring `threads` would label whatever
+    /// width it picked as the requested one, which is worse than having no
+    /// curve: it would look like a scaling result.
+    fn set_threads(&mut self, _threads: usize) -> bool {
+        false
+    }
+
+    /// `Tokenizer::encode_batch` — the library's own batch path, including its
+    /// own parallelism.
+    fn encode_batch(&mut self, texts: &[&str], out: &mut Ids) {
+        for encoding in self.tok.encode_batch(texts, false) {
+            out.extend_from_slice(&encoding.ids);
+        }
+    }
+
+    /// `enable_padding` / `no_padding`. `PaddingParams::default()` is already
+    /// `BatchLongest`, which is exactly [`Padding::Longest`].
+    fn set_padding(&mut self, padding: Padding) -> bool {
+        match padding {
+            Padding::Off => {
+                self.tok.no_padding();
+            }
+            Padding::Longest => {
+                self.tok.enable_padding(tokie::PaddingParams::default());
+            }
+        }
+        true
     }
 
     /// `Tokenizer::decode` returns `Option`, with `None` for a byte sequence

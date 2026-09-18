@@ -16,49 +16,69 @@ pub const REFERENCE: &str = "hf-tokenizers";
 /// Engines reached in-process (native Rust, C ABI, embedded interpreter).
 // Built by successive pushes rather than a `vec![]` literal because every entry
 // is `#[cfg]`-gated independently; a literal cannot express that.
-#[allow(unused_mut, clippy::vec_init_then_push)]
+#[allow(unused_mut)]
 pub fn native() -> Vec<(&'static str, Ctor)> {
+    /// Register one engine twice: as itself, and as `<name>-no-cache`.
+    ///
+    /// The cache-free twin is a full row rather than a footnote, because a
+    /// cache's contribution is otherwise unknowable from the outside -- and
+    /// because it is exactly the number that was silently wrong before
+    /// (`pipeline-no-cache` reported the cached engine for as long as the
+    /// canonical reader ignored `cache_capacity`).
+    ///
+    /// `Build::build_without_cache` defaults to refusing, so an engine with no
+    /// way to disable its caches contributes an explicit `unsupported: <why>`
+    /// instead of a number that invites a wrong subtraction. Both halves share
+    /// one `#[cfg]`, so a feature can never register only one of them.
+    macro_rules! engine {
+        ($v:ident, $feature:literal, $name:literal, $adapter:path) => {
+            #[cfg(feature = $feature)]
+            {
+                $v.push(($name, <$adapter>::build as Ctor));
+                $v.push((
+                    concat!($name, "-no-cache"),
+                    <$adapter>::build_without_cache as Ctor,
+                ));
+            }
+        };
+    }
+
     let mut v: Vec<(&'static str, Ctor)> = Vec::new();
 
-    #[cfg(feature = "hf-tokenizers")]
-    v.push((
+    engine!(
+        v,
         "hf-tokenizers",
-        tokbench_hf_tokenizers::Adapter::build as Ctor,
-    ));
-    // The target encode path from tokenizers#2279: same project as the
-    // reference, so this pairing is a controlled before/after.
-    #[cfg(feature = "pipeline")]
-    v.push(("pipeline", tokbench_pipeline::Adapter::build as Ctor));
-    #[cfg(feature = "kitoken")]
-    v.push(("kitoken", tokbench_kitoken::Adapter::build as Ctor));
-    #[cfg(feature = "fastokens")]
-    v.push(("fastokens", tokbench_fastokens::Adapter::build as Ctor));
-    #[cfg(feature = "tokie")]
-    v.push(("tokie", tokbench_tokie::Adapter::build as Ctor));
-    #[cfg(feature = "tiktoken")]
-    v.push(("tiktoken", tokbench_tiktoken::Adapter::build as Ctor));
-    #[cfg(feature = "rust-gems-bpe")]
-    v.push((
+        "hf-tokenizers",
+        tokbench_hf_tokenizers::Adapter
+    );
+    engine!(v, "pipeline", "pipeline", tokbench_pipeline::Adapter);
+    engine!(v, "kitoken", "kitoken", tokbench_kitoken::Adapter);
+    engine!(v, "fastokens", "fastokens", tokbench_fastokens::Adapter);
+    engine!(v, "tokie", "tokie", tokbench_tokie::Adapter);
+    engine!(v, "tiktoken", "tiktoken", tokbench_tiktoken::Adapter);
+    engine!(
+        v,
         "rust-gems-bpe",
-        tokbench_rust_gems_bpe::Adapter::build as Ctor,
-    ));
-    #[cfg(feature = "wordchipper")]
-    v.push(("wordchipper", tokbench_wordchipper::Adapter::build as Ctor));
-    #[cfg(feature = "sentencepiece")]
-    v.push((
+        "rust-gems-bpe",
+        tokbench_rust_gems_bpe::Adapter
+    );
+    engine!(
+        v,
+        "wordchipper",
+        "wordchipper",
+        tokbench_wordchipper::Adapter
+    );
+    engine!(
+        v,
         "sentencepiece",
-        tokbench_sentencepiece::Adapter::build as Ctor,
-    ));
-    #[cfg(feature = "blingfire")]
-    v.push(("blingfire", tokbench_blingfire::Adapter::build as Ctor));
-    #[cfg(feature = "gigatoken")]
-    v.push(("gigatoken", tokbench_gigatoken::Adapter::build as Ctor));
-    #[cfg(feature = "llamacpp")]
-    v.push(("llamacpp", tokbench_llamacpp::Adapter::build as Ctor));
-    #[cfg(feature = "iree")]
-    v.push(("iree", tokbench_iree::Adapter::build as Ctor));
-    #[cfg(feature = "executorch")]
-    v.push(("executorch", tokbench_executorch::Adapter::build as Ctor));
+        "sentencepiece",
+        tokbench_sentencepiece::Adapter
+    );
+    engine!(v, "blingfire", "blingfire", tokbench_blingfire::Adapter);
+    engine!(v, "gigatoken", "gigatoken", tokbench_gigatoken::Adapter);
+    engine!(v, "llamacpp", "llamacpp", tokbench_llamacpp::Adapter);
+    engine!(v, "iree", "iree", tokbench_iree::Adapter);
+    engine!(v, "executorch", "executorch", tokbench_executorch::Adapter);
 
     v
 }

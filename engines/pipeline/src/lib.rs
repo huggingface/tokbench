@@ -1,5 +1,5 @@
 //! The HuggingFace **rc0 pipeline** — `tk-encode` + `tk-serialize` from
-//! [`feat/train_encode_split`](https://github.com/huggingface/tokenizers/tree/feat/train_encode_split),
+//! [`tokenizers-rc0`](https://github.com/huggingface/tokenizers/tree/5c3727a93bd64cd9caf0e229c637fc71f2cd2fce),
 //! the 1.0.0-rc.0 line.
 //!
 //! This is the interesting row in the table: it is the same project as the
@@ -66,48 +66,100 @@
 //! is a copy the public API forces, the user pays it too, and the fairness
 //! contract says it stays in the number.
 
-use tk_encode::pipeline::{PipelineToken, PipelineTokenizer};
-use tokbench_core::{unsupported, Build, Class, Engine, Ids, Info, Model, Unsupported};
+use tk_encode::pipeline::{EncodeOptions, Override, PipelineToken, PipelineTokenizer};
+use tk_encode::PaddingParams;
+use tokbench_core::{unsupported, Build, Class, Engine, Ids, Info, Model, Padding, Unsupported};
 
 pub struct Adapter {
     tok: PipelineTokenizer,
     /// Reused across calls, so the timed loop never grows it — the same
     /// buffer-reuse a real encode loop does, and what `encode_into` is for.
     scratch: Vec<PipelineToken>,
+    cache_enabled: bool,
+    /// Rebuilt by `set_padding`, so the padded and unpadded cells differ by
+    /// exactly this and nothing else.
+    options: EncodeOptions,
+    /// What `set_threads` last accepted, reported through
+    /// `Info::internally_parallel` rather than hardcoded.
+    threads: usize,
+}
+
+fn build(model: &Model, cache_enabled: bool) -> Result<Box<dyn Engine>, Unsupported> {
+    let path = model.tokenizer_json();
+    if !path.exists() {
+        return Err(Unsupported("no tokenizer.json".into()));
+    }
+    // Every config in `data/models` is still version 1.0, and rc0's reader
+    // is canonical-only (`version: "2.0"`) by design. The upgrade pass is a
+    // pure JSON->JSON rewrite and runs here, at load time, outside the
+    // timed region — the same thing upstream's own benches do.
+    let canonical = tk_convert::canonicalize_file(&path)
+        .map_err(|e| Unsupported(format!("tk-convert cannot upgrade this config: {e}")))?;
+    let canonical = if cache_enabled {
+        canonical
+    } else {
+        let mut value: serde_json::Value = serde_json::from_str(&canonical)
+            .map_err(|e| Unsupported(format!("cannot parse canonical config: {e}")))?;
+        let model = value
+            .get_mut("model")
+            .and_then(serde_json::Value::as_object_mut)
+            .ok_or_else(|| Unsupported("canonical config has no model object".into()))?;
+        model.insert("cache_capacity".into(), serde_json::Value::from(0));
+        serde_json::to_string(&value)
+            .map_err(|e| Unsupported(format!("cannot write no-cache config: {e}")))?
+    };
+    let tok = tk_serialize::from_json(&canonical)
+        .map_err(|e| Unsupported(format!("tk-serialize cannot read this config: {e}")))?;
+    Ok(Box::new(Adapter {
+        tok,
+        scratch: Vec::new(),
+        cache_enabled,
+        options: EncodeOptions {
+            add_special_tokens: false,
+            padding: Override::Off,
+        },
+        threads: 1,
+    }))
 }
 
 impl Build for Adapter {
     fn build(model: &Model) -> Result<Box<dyn Engine>, Unsupported> {
-        let path = model.tokenizer_json();
-        if !path.exists() {
-            return Err(Unsupported("no tokenizer.json".into()));
-        }
-        // Every config in `data/models` is still version 1.0, and rc0's reader
-        // is canonical-only (`version: "2.0"`) by design. The upgrade pass is a
-        // pure JSON->JSON rewrite and runs here, at load time, outside the
-        // timed region — the same thing upstream's own benches do.
-        let canonical = tk_convert::canonicalize_file(&path)
-            .map_err(|e| Unsupported(format!("tk-convert cannot upgrade this config: {e}")))?;
-        let tok = tk_serialize::from_json(&canonical)
-            .map_err(|e| Unsupported(format!("tk-serialize cannot read this config: {e}")))?;
-        Ok(Box::new(Adapter {
-            tok,
-            scratch: Vec::new(),
-        }))
+        build(model, true)
+    }
+
+    /// `cache_capacity: 0` in the canonical config, which the reader now
+    /// honours.
+    ///
+    /// It did not always: `tk-serialize`'s `read_bpe` built `BpeConfig` with
+    /// `..BpeConfig::default()` and never read this field, so the request was
+    /// discarded and this row reported the *cached* engine under a cache-free
+    /// name -- making the word cache look worth 0%. Fixed upstream, and the
+    /// `rev` in `Cargo.toml` is pinned past the fix, so asking works.
+    ///
+    /// Measured contribution once it did work (gpt2, 14 MB of deduplicated
+    /// English, one thread): 172 MB/s with no cache against 260 with it.
+    fn build_without_cache(model: &Model) -> Result<Box<dyn Engine>, Unsupported> {
+        build(model, false)
     }
 }
 
 impl Engine for Adapter {
     fn info(&self) -> Info {
         Info {
-            name: "pipeline",
+            name: if self.cache_enabled {
+                "pipeline"
+            } else {
+                "pipeline-no-cache"
+            },
             // Not a release: a pinned rev on the rc0 branch. See Cargo.toml.
-            version: "tk-encode 1.0.0-rc.0 (feat/train_encode_split @ 0743ac07)",
+            version: "tk-encode 1.0.0-rc.0 (tokenizers-rc0 @ 5c3727a9)",
             lang: "rust",
             class: Class::Native,
-            url: "https://github.com/huggingface/tokenizers/tree/feat/train_encode_split",
+            url: "https://github.com/huggingface/tokenizers/tree/5c3727a93bd64cd9caf0e229c637fc71f2cd2fce",
             also_computes: "",
-            internally_parallel: false,
+            // Reported, not declared: true exactly when this instance was
+            // told to use more than one thread.
+            internally_parallel: self.threads > 1,
         }
     }
 
@@ -115,9 +167,62 @@ impl Engine for Adapter {
         self.scratch.clear();
         // A cell that fails mid-run must not silently look fast. Leaving `out`
         // short changes the id hash, so verification flags it.
-        if self.tok.encode_into(text, false, &mut self.scratch).is_ok() {
+        //
+        // One document, so this is never fanned out across the pool whatever
+        // `set_threads` was given: `encode_flat` requires more than one.
+        if self
+            .tok
+            .encode_into(text, &self.options, &mut self.scratch)
+            .is_ok()
+        {
             out.extend(self.scratch.iter().map(|t| t.id()));
         }
+    }
+
+    fn has_native_batch(&self) -> bool {
+        true
+    }
+
+    /// `parallelism::set_num_threads` — a real thread count, not a boolean, so
+    /// every point on the sweep is reachable.
+    fn set_threads(&mut self, threads: usize) -> bool {
+        if threads == 0 {
+            return false;
+        }
+        tk_encode::parallelism::set_num_threads(threads);
+        self.threads = threads;
+        true
+    }
+
+    /// The library's own batch entry point. `encode` over a `Vec<String>` is
+    /// what dispatches to `parallel::encode_flat`, so this is the only call
+    /// that exercises the pool at all.
+    fn encode_batch(&mut self, texts: &[&str], out: &mut Ids) {
+        // `Inputs` needs owned strings, so this clone is the price of the
+        // public API and is charged to the engine, as the fairness contract
+        // requires. It is identical in both padding modes.
+        let owned: Vec<String> = texts.iter().map(|t| (*t).to_string()).collect();
+        if let Ok(encodings) = self.tok.encode(owned, &self.options).wait() {
+            for encoding in &encodings {
+                // `ids()` is `&[PipelineToken]`, which is `repr(transparent)`
+                // over `u32`; tokbench compares `u32`, so the restatement is a
+                // copy and nothing more -- the same one `encode` above pays.
+                out.extend(encoding.ids().iter().map(|t| t.id()));
+            }
+        }
+    }
+
+    /// Padding is a per-call `EncodeOptions` override here, so both modes come
+    /// from one tokenizer and differ by nothing else.
+    fn set_padding(&mut self, padding: Padding) -> bool {
+        self.options.padding = match padding {
+            Padding::Off => Override::Off,
+            Padding::Longest => Override::With(PaddingParams {
+                pad_id: 0,
+                ..PaddingParams::default()
+            }),
+        };
+        true
     }
 
     /// `PipelineTokenizer::decode` — the path

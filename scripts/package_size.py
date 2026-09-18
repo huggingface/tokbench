@@ -49,7 +49,7 @@ ENGINES = {
     "executorch":     ("pypi",   "pytorch-tokenizers"),
     "mistral-common": ("pypi",   "mistral-common"),
     "ai-tokenizer":   ("npm",    "ai-tokenizer"),
-    "pipeline":       ("source", "tokenizers#2279 poc/target-encode - unreleased branch"),
+    "pipeline":       ("source", "tokenizers 1.0.0-rc.0 @ 5c3727a9 - unreleased source"),
     "minbpe":         ("source", "karpathy/minbpe - git only, no published package"),
     "iree":           ("source", "iree-org/iree - C source, built from the IREE tree"),
 }

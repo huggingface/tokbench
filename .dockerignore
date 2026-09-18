@@ -1,0 +1,12 @@
+.git
+.idea
+.tokbench
+data
+target
+figs
+__pycache__
+*.pyc
+binary_sizes.json
+footprint.json
+package_sizes.json
+tokenizer_bench_results.json

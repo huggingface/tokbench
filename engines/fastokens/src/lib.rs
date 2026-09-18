@@ -11,6 +11,9 @@ use tokbench_core::{unsupported, Build, Class, Engine, Ids, Info, Model, Unsuppo
 
 pub struct Adapter {
     tok: fastokens::Tokenizer,
+    /// Sized by `set_threads`; the library's `par_iter` runs inside it.
+    pool: Option<rayon::ThreadPool>,
+    threads: usize,
 }
 
 impl Build for Adapter {
@@ -21,7 +24,11 @@ impl Build for Adapter {
         }
         let tok = fastokens::Tokenizer::from_file(&path)
             .map_err(|e| Unsupported(format!("fastokens cannot load this config: {e}")))?;
-        Ok(Box::new(Adapter { tok }))
+        Ok(Box::new(Adapter {
+            tok,
+            pool: None,
+            threads: 1,
+        }))
     }
 }
 
@@ -34,13 +41,53 @@ impl Engine for Adapter {
             class: Class::Native,
             url: "https://github.com/Atero-ai/fastokens",
             also_computes: "",
-            internally_parallel: false,
+            internally_parallel: self.threads > 1,
         }
     }
 
     fn encode(&mut self, text: &str, out: &mut Ids) {
         if let Ok(ids) = self.tok.encode_ordinary(text) {
             out.extend_from_slice(&ids);
+        }
+    }
+
+    fn has_native_batch(&self) -> bool {
+        true
+    }
+
+    /// `encode_batch` fans out with `par_iter`, so the current rayon pool is
+    /// this library's thread count. Installing a sized pool is the only
+    /// per-instance way to ask for one; `RAYON_NUM_THREADS` is process-wide
+    /// and cannot vary across a sweep.
+    fn set_threads(&mut self, threads: usize) -> bool {
+        if threads == 0 {
+            return false;
+        }
+        self.pool = if threads > 1 {
+            match rayon::ThreadPoolBuilder::new().num_threads(threads).build() {
+                Ok(pool) => Some(pool),
+                // Refuse rather than fall back to the global pool, which would
+                // report some other width as `threads`.
+                Err(_) => return false,
+            }
+        } else {
+            None
+        };
+        self.threads = threads;
+        true
+    }
+
+    /// `fastokens::Tokenizer::encode_batch` — the library's own batch path.
+    fn encode_batch(&mut self, texts: &[&str], out: &mut Ids) {
+        let encode = || self.tok.encode_batch(texts, false);
+        let encoded = match &self.pool {
+            Some(pool) => pool.install(encode),
+            None => encode(),
+        };
+        if let Ok(batch) = encoded {
+            for ids in &batch {
+                out.extend_from_slice(ids);
+            }
         }
     }
 
