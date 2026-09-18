@@ -71,28 +71,55 @@
 //!   threads. Any engine with a coarse internal chunk floor needs the bigger
 //!   batch before its curve means anything.
 //! * **The pretoken cache is not "the main source of the speedup", it is
-//!   very nearly the whole of it.** Measured three ways on 14 MB of
-//!   deduplicated English (100% unique lines), gpt2, ids verified against
-//!   `tokenizers 0.23.1` in every cell:
+//!   very nearly the whole of it.**
 //!
-//!   | cache state | gigatoken 1T | gigatoken 8T | pipeline 1T | pipeline 8T |
-//!   | --- | --- | --- | --- | --- |
-//!   | disabled | 60 | 271 | 260 | 1195 |
-//!   | default (warmed on a disjoint 1/6) | 400 | 783 | 263 | 1364 |
-//!   | primed (every pretoken resident) | 741 | 1910 | 290 | 1651 |
+//!   ONLY THE `default` COLUMN BELOW IS A THROUGHPUT NUMBER. The other two are
+//!   an ablation: `disabled` needs a patched build of the crate, and `primed`
+//!   encodes the measured text before timing it, which is the one thing
+//!   `measure_scaling` exists to avoid (it warms on a disjoint sixth, and
+//!   `reused_text` flags any cell that replays input). `primed` is an upper
+//!   bound on a cache that has already seen your corpus. Nothing should ever
+//!   be quoted from it.
 //!
-//!   gigatoken spans **12.4x** at one thread across those three states; the
-//!   HF pipeline spans **1.1x**. With the cache bypassed gigatoken is 4.3x
-//!   *slower* than the pipeline at one thread; fully primed it is 2.6x
-//!   faster. So a gigatoken number without its cache state stated is not a
-//!   result, and its published figures are primed-cache figures.
+//!   gpt2, one thread, 14 MB of deduplicated English (100% unique lines):
 //!
-//!   Part of that gap is structural rather than tuning: gigatoken seeds its
+//!   | cache state | gigatoken | pipeline |
+//!   | --- | --- | --- |
+//!   | disabled (patched crate) | 60 | 172 |
+//!   | **default** | **400** | **244** |
+//!   | primed (ablation, not throughput) | 741 | 432 |
+//!
+//!   So the cache is worth 6.7x to gigatoken and 1.4x to the pipeline, and
+//!   bypassed entirely gigatoken is 2.9x *slower*. A gigatoken number without
+//!   its cache state stated is not a result.
+//!
+//!   Part of that is structural rather than tuning: gigatoken seeds its
 //!   pretoken cache with ~50k vocab entries at construction (see
-//!   `ShortPretokenCache::with_at_least`), so it starts at a ~99.3% hit rate
-//!   — its merge path is annotated as running on "~0.7% of" pretokens. The
-//!   pipeline's `WordCache` starts empty and defaults to 65,536 slots, which
-//!   cannot even hold english.txt's 105,627 distinct words.
+//!   `ShortPretokenCache::with_at_least`) and the table doubles rather than
+//!   evicting (`fn grow`), so it starts near a ~99.3% hit rate and keeps
+//!   everything it sees — its merge path is annotated as running on "~0.7% of"
+//!   pretokens. The pipeline's `WordCache` starts empty and evicts at a fixed
+//!   65,536 slots. That capacity is not the binding constraint, though:
+//!   raising it to 262,144 moves one thread from 244 to 258 MB/s, inside
+//!   noise, even though english.txt has 105,627 distinct words. Zipf means the
+//!   tail it evicts is the part it would not have hit again.
+//!
+//!   **And it is a property of the language, not of the engine.** English
+//!   pretokens recur about 8x (105,627 unique of 876,601); Chinese ones about
+//!   1.3x (53,237 of 69,863, over 7,007 distinct characters against 350). So a
+//!   growing cache fills itself on English in one pass and cannot on Chinese.
+//!   gpt2, one thread, `chinese.txt`:
+//!
+//!   | cache state | gigatoken | pipeline |
+//!   | --- | --- | --- |
+//!   | **default** | **61.9** | **85.2** |
+//!   | primed (ablation) | 221.4 | 86.4 |
+//!
+//!   On Chinese the pipeline's cache is worth nothing at all (1.01x) and
+//!   gigatoken's is worth 3.58x — so with a realistic warm gigatoken drops
+//!   *below* the pipeline, which wins by 1.37x. The English advantage is real
+//!   but it belongs to the corpus. Ids on the Chinese rows are unverified:
+//!   that run carried no reference engine.
 //!
 //!   The cache lives on the `Tokenizer`/`EncodeState` this struct owns, so it
 //!   persists across `encode` calls. `tokbench_core::measure` walks the whole corpus once
