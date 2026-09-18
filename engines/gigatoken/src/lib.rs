@@ -110,18 +110,35 @@
 //!   | 65,536 | 259.5 | 230.8 | **1.12x** |
 //!   | 262,144 | 387.3 | 239.4 | 1.62x |
 //!
-//!   At equal memory gigatoken's 1.47x lead becomes 1.12x. What the second row
-//!   shows is the design difference that does matter, and it is not the probe
-//!   layout: **gigatoken turns capacity into throughput and the pipeline does
-//!   not.** Four times the slots is +49% for gigatoken (259.5 -> 387.3) and
-//!   +4% for the pipeline (230.8 -> 239.4).
+//!   At equal memory gigatoken's 1.47x lead becomes 1.12x.
 //!
-//!   So "65,536 is not the binding constraint" is the wrong reading of the
-//!   pipeline's flat response to more memory. The constraint is that a 16-slot
-//!   window that evicts on collision cannot use more memory; a growing
-//!   open-addressed table that never evicts can. Zipf makes eviction cheap in
-//!   hit rate, and that is exactly why raising the capacity alone buys nothing
-//!   without changing how the table grows.
+//!   The 262,144 row is NOT a design difference, and an earlier version of
+//!   this file said it was ("gigatoken turns capacity into throughput and the
+//!   pipeline does not", from +49% against +4%). Two later measurements say
+//!   otherwise:
+//!
+//!   * The pipeline's cache is already at a **95.87% hit rate** -- instrumented
+//!     over 7.18M lookups on this corpus: 84.80% resolve from the home slot,
+//!     11.06% displaced, **4.13% miss**. There is no room for capacity to buy
+//!     +49%, because there are only 4% of lookups left to win.
+//!   * Refusing to evict changes nothing. Turned into a bounded first-come
+//!     table (ids identical), one thread on gpt2 reads 242.4 -> 245.9 at 16k
+//!     slots, 241.6 -> 241.8 at 65k and 232.0 -> 247.5 at 262k. Signs go both
+//!     ways, the spread is inside this cell's ~15% run variance, and the
+//!     largest delta sits at the capacity with the *least* eviction pressure.
+//!
+//!   The likelier reading of gigatoken's +49% is that it is recovering from its
+//!   own vocab seed: ~50k entries into a 65,536-slot budget leaves ~15k for the
+//!   corpus, so the 65,536 row understates it and the 1.12x there is the fairer
+//!   number, not the 1.62x.
+//!
+//!   What this adds up to is that the pipeline's word cache is close to maxed
+//!   out, and no cache-side change reaches a 2x. Every lever tried landed in
+//!   the noise: capacity +4%, eviction ~0%, one-cache-line probing capped at
+//!   the 11.06% displaced lookups, four inline ids capped at the 3.79% of words
+//!   that encode to exactly four (ported, byte-exact, +8% at one thread, then
+//!   reverted), and prefetch and huge pages dead because throughput is flat
+//!   from an 8 MB table to a 128 MB one.
 //!
 //!   Caveat on the method: capping gigatoken makes it a bounded *first-come*
 //!   cache (inserts refused at the 3/4 load where it would have doubled) while
