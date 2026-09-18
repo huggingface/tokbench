@@ -154,6 +154,23 @@ struct Args {
     #[arg(long, global = true)]
     reverse_scaling: bool,
 
+    /// Which padding modes the scaling sweep measures: `off`, `longest`, or
+    /// `both`.
+    ///
+    /// Both by default. Padding to the longest document in a batch is a large
+    /// and uneven cost -- a fill, often a second pass, sometimes a different
+    /// output layout -- and it is a hard requirement for anyone feeding
+    /// rectangular tensors, so the unpadded number alone is not usable for
+    /// serving. Engines with no native padding report the padded cell as
+    /// unsupported; the harness never pads on an engine's behalf.
+    #[arg(
+        long = "padding",
+        value_parser = ["off", "longest", "both"],
+        default_value = "both",
+        global = true
+    )]
+    padding: String,
+
     /// Per-engine stripped binary deltas, as written by `scripts/binsize.sh`.
     /// Merged into the report when present.
     #[arg(long, default_value = "binary_sizes.json")]
@@ -279,6 +296,10 @@ struct EngineResult {
     /// Multi-thread scaling curve, when the sweep ran for this cell.
     #[serde(skip_serializing_if = "Option::is_none")]
     scaling: Option<Vec<ScalePoint>>,
+    /// Padding modes this engine has no native support for, so no padded
+    /// measurement exists rather than an unpadded one wearing a padded label.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    padding_unsupported: Option<Vec<String>>,
 
     /// True when the corpus could not supply `reps + 1` disjoint slices, so
     /// some text was encoded more than once inside the measurement. Such a
@@ -324,7 +345,19 @@ struct ScalePoint {
     mbps: f64,
     /// Percentage of perfect linear scaling from the 1-thread number. 100% =
     /// each added core added a full core's worth of throughput.
+    ///
+    /// 0.0 means there was no 1-thread point to divide by: an engine whose
+    /// parallelism cannot be pinned to one thread has no baseline, and
+    /// inventing one from its widest point would report 100% for an engine
+    /// whose scaling is in fact unknown.
     efficiency_pct: f64,
+    /// `"off"` or `"longest"`. Points from different padding modes are NOT
+    /// comparable and must never be mixed in one curve.
+    padding: String,
+    /// `"internal"` (the engine's own pool, via its batch API) or `"external"`
+    /// (one engine instance per thread, because the library exposes no
+    /// threading of its own).
+    parallelism: String,
 }
 
 /// One entry of `package_sizes.json`.
@@ -474,21 +507,35 @@ fn format_scaling_efficiency(percent: f64) -> String {
     format!("{:.0}% observed", percent.round())
 }
 
-fn scaling_first(result: &EngineResult) -> Option<&ScalePoint> {
+/// Padding modes that get their own columns, in order.
+///
+/// Fixed rather than derived from the run so the table has the same shape
+/// whatever `--padding` was passed; a mode that was not measured renders `-`.
+const PADDING_COLUMNS: [&str; 2] = ["off", "longest"];
+
+/// The 1-thread point of ONE padding mode's curve.
+///
+/// `padding` is not optional and has no default: a curve is only a curve
+/// within a single padding mode, and a helper that scanned every point would
+/// silently pair a padded number with an unpadded one.
+fn scaling_first<'a>(result: &'a EngineResult, padding: &str) -> Option<&'a ScalePoint> {
     result
         .scaling
         .as_deref()
         .unwrap_or_default()
         .iter()
+        .filter(|point| point.padding == padding)
         .find(|point| point.threads == 1)
 }
 
-fn scaling_last(result: &EngineResult) -> Option<&ScalePoint> {
+/// The widest point of ONE padding mode's curve.
+fn scaling_last<'a>(result: &'a EngineResult, padding: &str) -> Option<&'a ScalePoint> {
     result
         .scaling
         .as_deref()
         .unwrap_or_default()
         .iter()
+        .filter(|point| point.padding == padding)
         .max_by_key(|point| point.threads)
 }
 
@@ -529,18 +576,23 @@ fn print_collapsed_measurement_table(
     }
     headers.push("corpora".into());
     match measurement {
-        MeasureCommand::Encode => headers.extend(["median MB/s", "median ns/B"].map(str::to_string)),
+        MeasureCommand::Encode => {
+            headers.extend(["median MB/s", "median ns/B"].map(str::to_string))
+        }
         MeasureCommand::Decode => {
             headers.extend(["median MB/s", "median ns/token"].map(str::to_string))
         }
         MeasureCommand::Latency => {
-            headers.extend(
-                ["median p50 us", "median p99 us", "samples"].map(str::to_string),
-            )
+            headers.extend(["median p50 us", "median p99 us", "samples"].map(str::to_string))
         }
-        MeasureCommand::Scaling => headers.extend(
-            ["median 1T MB/s", "median max MB/s", "median scaling"].map(str::to_string),
-        ),
+        // One group of three per padding mode, in `PADDING_COLUMNS` order.
+        MeasureCommand::Scaling => headers.extend(PADDING_COLUMNS.iter().flat_map(|padding| {
+            [
+                format!("median 1T MB/s [pad {padding}]"),
+                format!("median max MB/s [pad {padding}]"),
+                format!("median scaling [pad {padding}]"),
+            ]
+        })),
     }
     if let Some(comparator) = compare_to {
         match measurement {
@@ -549,8 +601,10 @@ fn print_collapsed_measurement_table(
                 headers.push(format!("p99 vs {comparator}"));
             }
             MeasureCommand::Scaling => {
-                headers.push(format!("1T vs {comparator}"));
-                headers.push(format!("max vs {comparator}"));
+                for padding in PADDING_COLUMNS {
+                    headers.push(format!("1T vs {comparator} [pad {padding}]"));
+                    headers.push(format!("max vs {comparator} [pad {padding}]"));
+                }
             }
             _ => headers.push(format!("vs {comparator}")),
         }
@@ -580,7 +634,10 @@ fn print_collapsed_measurement_table(
                 } else {
                     format!("{}/{}", complete.len(), expected)
                 });
-                row.push(fmt(median(complete.iter().map(|(r, _)| r.mbps).collect()), 1));
+                row.push(fmt(
+                    median(complete.iter().map(|(r, _)| r.mbps).collect()),
+                    1,
+                ));
                 row.push(fmt(
                     median(complete.iter().map(|(r, _)| r.ns_per_byte).collect()),
                     2,
@@ -629,7 +686,8 @@ fn print_collapsed_measurement_table(
                             let comparator = comparator.as_ref()?;
                             let target = result.decode_mbps?;
                             let baseline = comparator.decode_mbps?;
-                            (result.decode_text_hash == comparator.decode_text_hash && baseline > 0.0)
+                            (result.decode_text_hash == comparator.decode_text_hash
+                                && baseline > 0.0)
                                 .then_some(target / baseline)
                         })
                         .collect();
@@ -647,24 +705,36 @@ fn print_collapsed_measurement_table(
                     format!("{}/{}", complete.len(), expected)
                 });
                 row.push(fmt(
-                    median(complete.iter().filter_map(|(r, _)| r.latency_p50_us).collect()),
+                    median(
+                        complete
+                            .iter()
+                            .filter_map(|(r, _)| r.latency_p50_us)
+                            .collect(),
+                    ),
                     2,
                 ));
                 row.push(fmt(
-                    median(complete.iter().filter_map(|(r, _)| r.latency_p99_us).collect()),
+                    median(
+                        complete
+                            .iter()
+                            .filter_map(|(r, _)| r.latency_p99_us)
+                            .collect(),
+                    ),
                     2,
                 ));
                 let sample_counts: Vec<_> = complete
                     .iter()
                     .filter_map(|(result, _)| result.latency_samples)
                     .collect();
-                row.push(match (sample_counts.iter().min(), sample_counts.iter().max()) {
-                    (Some(minimum), Some(maximum)) if minimum != maximum => {
-                        format!("{minimum}–{maximum}")
-                    }
-                    (Some(samples), _) => samples.to_string(),
-                    _ => "-".into(),
-                });
+                row.push(
+                    match (sample_counts.iter().min(), sample_counts.iter().max()) {
+                        (Some(minimum), Some(maximum)) if minimum != maximum => {
+                            format!("{minimum}–{maximum}")
+                        }
+                        (Some(samples), _) => samples.to_string(),
+                        _ => "-".into(),
+                    },
+                );
                 if compare_to.is_some() {
                     for percentile in [50, 99] {
                         let ratios = complete
@@ -684,72 +754,93 @@ fn print_collapsed_measurement_table(
                 }
             }
             MeasureCommand::Scaling => {
-                let complete: Vec<_> = entries
+                // "measured" counts cells that produced any curve at all, in
+                // any padding mode; the per-mode columns below say which.
+                let any: Vec<_> = entries
                     .iter()
                     .filter(|(result, _)| {
-                        scaling_first(result).is_some() && scaling_last(result).is_some()
+                        result
+                            .scaling
+                            .as_deref()
+                            .is_some_and(|points| !points.is_empty())
                     })
                     .collect();
                 row.push(if compare_to.is_some() {
-                    format!("{}/{} measured", complete.len(), expected)
+                    format!("{}/{} measured", any.len(), expected)
                 } else {
-                    format!("{}/{}", complete.len(), expected)
+                    format!("{}/{}", any.len(), expected)
                 });
-                row.push(fmt(
-                    median(
-                        complete
-                            .iter()
-                            .filter_map(|(r, _)| scaling_first(r).map(|p| p.mbps))
-                            .collect(),
-                    ),
-                    1,
-                ));
-                row.push(fmt(
-                    median(
-                        complete
-                            .iter()
-                            .filter_map(|(r, _)| scaling_last(r).map(|p| p.mbps))
-                            .collect(),
-                    ),
-                    1,
-                ));
-                let efficiencies: Vec<_> = complete
-                    .iter()
-                    .filter_map(|(result, _)| scaling_last(result).map(|point| point.efficiency_pct))
-                    .collect();
-                row.push(match (
-                    median(efficiencies.clone()),
-                    efficiencies.iter().copied().min_by(f64::total_cmp),
-                    efficiencies.iter().copied().max_by(f64::total_cmp),
-                ) {
-                    (Some(median), Some(minimum), Some(maximum)) => format!(
-                        "{} ({}–{}% corpus range)",
-                        format_scaling_efficiency(median),
-                        minimum.round(),
-                        maximum.round()
-                    ),
-                    _ => "-".into(),
-                });
+
+                for padding in PADDING_COLUMNS {
+                    // Each column filters on its OWN point, not on the pair.
+                    // An engine whose parallelism cannot be pinned to one
+                    // thread has no 1T point, and requiring one would drop its
+                    // wide-thread number from the table entirely.
+                    row.push(fmt(
+                        median(
+                            entries
+                                .iter()
+                                .filter_map(|(r, _)| scaling_first(r, padding).map(|p| p.mbps))
+                                .collect(),
+                        ),
+                        1,
+                    ));
+                    row.push(fmt(
+                        median(
+                            entries
+                                .iter()
+                                .filter_map(|(r, _)| scaling_last(r, padding).map(|p| p.mbps))
+                                .collect(),
+                        ),
+                        1,
+                    ));
+                    // 0.0 is the "no 1-thread baseline" marker, not a real 0%.
+                    let efficiencies: Vec<_> = entries
+                        .iter()
+                        .filter_map(|(result, _)| {
+                            scaling_last(result, padding).map(|point| point.efficiency_pct)
+                        })
+                        .filter(|efficiency| *efficiency > 0.0)
+                        .collect();
+                    row.push(
+                        match (
+                            median(efficiencies.clone()),
+                            efficiencies.iter().copied().min_by(f64::total_cmp),
+                            efficiencies.iter().copied().max_by(f64::total_cmp),
+                        ) {
+                            (Some(median), Some(minimum), Some(maximum)) => format!(
+                                "{} ({}\u{2013}{}% corpus range)",
+                                format_scaling_efficiency(median),
+                                minimum.round(),
+                                maximum.round()
+                            ),
+                            _ => "-".into(),
+                        },
+                    );
+                }
+
                 if compare_to.is_some() {
-                    for at_maximum in [false, true] {
-                        let ratios = complete
-                            .iter()
-                            .filter_map(|(result, comparator)| {
-                                let comparator = comparator.as_ref()?;
-                                let target = if at_maximum {
-                                    scaling_last(result)?
-                                } else {
-                                    scaling_first(result)?
-                                };
-                                let baseline = if at_maximum {
-                                    scaling_last(comparator)?
-                                } else {
-                                    scaling_first(comparator)?
-                                };
-                                (baseline.mbps > 0.0).then_some(target.mbps / baseline.mbps)
-                            })
-                            .collect();
-                        row.push(median_multiplier(ratios, expected));
+                    for padding in PADDING_COLUMNS {
+                        for at_maximum in [false, true] {
+                            let ratios = entries
+                                .iter()
+                                .filter_map(|(result, comparator)| {
+                                    let comparator = comparator.as_ref()?;
+                                    let target = if at_maximum {
+                                        scaling_last(result, padding)?
+                                    } else {
+                                        scaling_first(result, padding)?
+                                    };
+                                    let baseline = if at_maximum {
+                                        scaling_last(comparator, padding)?
+                                    } else {
+                                        scaling_first(comparator, padding)?
+                                    };
+                                    (baseline.mbps > 0.0).then_some(target.mbps / baseline.mbps)
+                                })
+                                .collect();
+                            row.push(median_multiplier(ratios, expected));
+                        }
                     }
                 }
             }
@@ -766,7 +857,12 @@ fn print_collapsed_measurement_table(
     }
 }
 
-fn print_table(headers: Vec<String>, rows: Vec<Vec<String>>, label_columns: usize, align_last: bool) {
+fn print_table(
+    headers: Vec<String>,
+    rows: Vec<Vec<String>>,
+    label_columns: usize,
+    align_last: bool,
+) {
     let mut widths: Vec<usize> = headers.iter().map(|header| header.len()).collect();
     for row in &rows {
         for (width, value) in widths.iter_mut().zip(row) {
@@ -877,11 +973,7 @@ fn pivot_engine_columns(
     (pivoted_headers, pivoted_rows)
 }
 
-fn print_measurement_table(
-    runs: &[Run],
-    measurement: MeasureCommand,
-    compare_to: Option<&str>,
-) {
+fn print_measurement_table(runs: &[Run], measurement: MeasureCommand, compare_to: Option<&str>) {
     let show_corpus = runs
         .iter()
         .map(|run| run.dataset_metadata.corpus.as_str())
@@ -894,7 +986,11 @@ fn print_measurement_table(
     }
     let show_engine = runs
         .iter()
-        .flat_map(|run| run.results.iter().map(|result| result.tokenizer_name.as_str()))
+        .flat_map(|run| {
+            run.results
+                .iter()
+                .map(|result| result.tokenizer_name.as_str())
+        })
         .filter(|engine| Some(*engine) != compare_to)
         .collect::<std::collections::BTreeSet<_>>()
         .len()
@@ -913,9 +1009,13 @@ fn print_measurement_table(
         MeasureCommand::Latency => {
             headers.extend(["p50 us", "p99 us", "samples"].map(str::to_string))
         }
-        MeasureCommand::Scaling => {
-            headers.extend(["1T MB/s", "max MB/s", "scaling"].map(str::to_string))
-        }
+        MeasureCommand::Scaling => headers.extend(PADDING_COLUMNS.iter().flat_map(|padding| {
+            [
+                format!("1T MB/s [pad {padding}]"),
+                format!("max MB/s [pad {padding}]"),
+                format!("scaling [pad {padding}]"),
+            ]
+        })),
     }
     if let Some(comparator) = compare_to {
         match measurement {
@@ -924,8 +1024,10 @@ fn print_measurement_table(
                 headers.push(format!("p99 vs {comparator}"));
             }
             MeasureCommand::Scaling => {
-                headers.push(format!("1T vs {comparator}"));
-                headers.push(format!("max vs {comparator}"));
+                for padding in PADDING_COLUMNS {
+                    headers.push(format!("1T vs {comparator} [pad {padding}]"));
+                    headers.push(format!("max vs {comparator} [pad {padding}]"));
+                }
             }
             _ => headers.push(format!("vs {comparator}")),
         }
@@ -957,14 +1059,16 @@ fn print_measurement_table(
                     row.push(
                         unsupported.map_or_else(|| format!("{:.1}", result.mbps), |_| "-".into()),
                     );
-                    row.push(unsupported.map_or_else(
-                        || format!("{:.2}", result.ns_per_byte),
-                        |_| "-".into(),
-                    ));
-                    row.push(unsupported.map_or_else(
-                        || result.total_tokens_produced.to_string(),
-                        |_| "-".into(),
-                    ));
+                    row.push(
+                        unsupported
+                            .map_or_else(|| format!("{:.2}", result.ns_per_byte), |_| "-".into()),
+                    );
+                    row.push(
+                        unsupported.map_or_else(
+                            || result.total_tokens_produced.to_string(),
+                            |_| "-".into(),
+                        ),
+                    );
                     row.push(if compare_to.is_some() {
                         match (unsupported, comparator) {
                             (Some(why), _) => format!("unsupported: {why}"),
@@ -1061,59 +1165,96 @@ fn print_measurement_table(
                             }
                         }
                     } else {
-                        row.push(unsupported.map_or_else(
-                            || "ok".into(),
-                            |why| format!("unsupported: {why}"),
-                        ));
+                        row.push(
+                            unsupported
+                                .map_or_else(|| "ok".into(), |why| format!("unsupported: {why}")),
+                        );
                     }
                 }
                 MeasureCommand::Scaling => {
-                    let points = result.scaling.as_deref().unwrap_or_default();
-                    let first = points.iter().find(|point| point.threads == 1);
-                    let last = points.iter().max_by_key(|point| point.threads);
-                    row.push(
-                        first.map_or_else(|| "-".into(), |point| format!("{:.1}", point.mbps)),
-                    );
-                    row.push(
-                        last.map_or_else(|| "-".into(), |point| format!("{:.1}", point.mbps)),
-                    );
-                    row.push(last.map_or_else(
-                        || "-".into(),
-                        |point| {
-                            format!(
-                                "{} @ {}T",
-                                format_scaling_efficiency(point.efficiency_pct),
-                                point.threads
-                            )
-                        },
-                    ));
+                    // No native support for a mode is `no native padding`, not
+                    // `-`: the distinction between "could not do it" and "was
+                    // not measured" is the whole reason this axis exists.
+                    let cannot_pad = |padding: &str| {
+                        result
+                            .padding_unsupported
+                            .as_deref()
+                            .is_some_and(|modes| modes.iter().any(|mode| mode == padding))
+                    };
+                    for padding in PADDING_COLUMNS {
+                        let first = scaling_first(result, padding);
+                        let last = scaling_last(result, padding);
+                        // The throughput columns are rendered into "1T {} MB/s",
+                        // so a prose marker there reads as "1T no native padding
+                        // MB/s". They get "-"; the reason goes in the scaling
+                        // column, which is free text.
+                        let why_missing = || {
+                            if cannot_pad(padding) {
+                                "no native padding".to_string()
+                            } else {
+                                "-".to_string()
+                            }
+                        };
+                        row.push(
+                            first.map_or_else(
+                                || "-".to_string(),
+                                |point| format!("{:.1}", point.mbps),
+                            ),
+                        );
+                        row.push(
+                            last.map_or_else(
+                                || "-".to_string(),
+                                |point| format!("{:.1}", point.mbps),
+                            ),
+                        );
+                        row.push(last.map_or_else(why_missing, |point| {
+                            // efficiency 0.0 = no 1-thread baseline to divide
+                            // by, which is unknown scaling, not 0% scaling.
+                            if point.efficiency_pct > 0.0 {
+                                format!(
+                                    "{} @ {}T ({})",
+                                    format_scaling_efficiency(point.efficiency_pct),
+                                    point.threads,
+                                    point.parallelism
+                                )
+                            } else {
+                                format!(
+                                    "n/a @ {}T ({}, no 1T baseline)",
+                                    point.threads, point.parallelism
+                                )
+                            }
+                        }));
+                    }
                     if compare_to.is_some() {
-                        let other_points = comparator
-                            .and_then(|other| other.scaling.as_deref())
-                            .unwrap_or_default();
-                        let other_first = other_points.iter().find(|point| point.threads == 1);
-                        let other_last = other_points.iter().max_by_key(|point| point.threads);
-                        if let Some(why) = unsupported {
-                            row.push(format!("unsupported: {why}"));
-                            row.push("-".into());
-                        } else if comparator
-                            .is_some_and(|other| result.ids_hash != other.ids_hash)
-                        {
-                            row.push("id mismatch".into());
-                            row.push("id mismatch".into());
-                        } else {
-                            row.push(match (first, other_first) {
-                                (Some(target), Some(baseline)) => {
-                                    multiplier(target.mbps, baseline.mbps)
-                                }
-                                _ => "comparator unsupported".into(),
-                            });
-                            row.push(match (last, other_last) {
-                                (Some(target), Some(baseline)) => {
-                                    multiplier(target.mbps, baseline.mbps)
-                                }
-                                _ => "comparator unsupported".into(),
-                            });
+                        for padding in PADDING_COLUMNS {
+                            let first = scaling_first(result, padding);
+                            let last = scaling_last(result, padding);
+                            let other_first =
+                                comparator.and_then(|other| scaling_first(other, padding));
+                            let other_last =
+                                comparator.and_then(|other| scaling_last(other, padding));
+                            if let Some(why) = unsupported {
+                                row.push(format!("unsupported: {why}"));
+                                row.push("-".into());
+                            } else if comparator
+                                .is_some_and(|other| result.ids_hash != other.ids_hash)
+                            {
+                                row.push("id mismatch".into());
+                                row.push("id mismatch".into());
+                            } else {
+                                row.push(match (first, other_first) {
+                                    (Some(target), Some(baseline)) => {
+                                        multiplier(target.mbps, baseline.mbps)
+                                    }
+                                    _ => "comparator unsupported".into(),
+                                });
+                                row.push(match (last, other_last) {
+                                    (Some(target), Some(baseline)) => {
+                                        multiplier(target.mbps, baseline.mbps)
+                                    }
+                                    _ => "comparator unsupported".into(),
+                                });
+                            }
                         }
                     } else {
                         row.push(match (unsupported, result.verified) {
@@ -1174,11 +1315,10 @@ fn main() -> Result<()> {
                 args.binary_sizes.display()
             );
         }
-        let pkg_sizes: BTreeMap<String, PackageSize> =
-            std::fs::read_to_string(&args.package_sizes)
-                .ok()
-                .and_then(|s| serde_json::from_str(&s).ok())
-                .unwrap_or_default();
+        let pkg_sizes: BTreeMap<String, PackageSize> = std::fs::read_to_string(&args.package_sizes)
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default();
         if pkg_sizes.is_empty() {
             eprintln!(
                 "note: no {} — package-size column omitted (run scripts/package_size.py)",
@@ -1222,13 +1362,9 @@ fn main() -> Result<()> {
     if all_engines && args.engine.len() != 1 {
         bail!("--engine all cannot be combined with another --engine value");
     }
-    if let Some(unknown) = args
-        .engine
-        .iter()
-        .find(|requested| {
-            requested.as_str() != "all" && !known_engines.contains(&requested.as_str())
-        })
-    {
+    if let Some(unknown) = args.engine.iter().find(|requested| {
+        requested.as_str() != "all" && !known_engines.contains(&requested.as_str())
+    }) {
         bail!(
             "engine {unknown} is not compiled in; available engines: {}",
             known_engines.join(", ")
@@ -1271,10 +1407,20 @@ fn main() -> Result<()> {
     if args.reverse_scaling {
         thread_sweep.reverse();
     }
+    let padding_modes: Vec<tokbench_core::Padding> = match args.padding.as_str() {
+        "off" => vec![tokbench_core::Padding::Off],
+        "longest" => vec![tokbench_core::Padding::Longest],
+        _ => vec![tokbench_core::Padding::Off, tokbench_core::Padding::Longest],
+    };
     if !args.scaling.is_empty() {
         eprintln!(
-            "scaling sweep on {:?} at thread counts {:?}",
-            args.scaling, thread_sweep
+            "scaling sweep on {:?} at thread counts {:?}, padding {:?}",
+            args.scaling,
+            thread_sweep,
+            padding_modes
+                .iter()
+                .map(|padding| padding.as_str())
+                .collect::<Vec<_>>()
         );
     }
     let want = |n: &str| {
@@ -1357,22 +1503,18 @@ fn main() -> Result<()> {
             let chunks = chunk(&text, CHUNK_BYTES, MAX_CHUNKS);
             let bytes: usize = chunks.iter().map(|c| c.len()).sum();
             let chars: usize = chunks.iter().map(|c| c.chars().count()).sum();
-            let measure_scaling_for_corpus = run_scaling
-                || (measurement.is_none() && args.scaling.contains(&corpus_name));
+            let measure_scaling_for_corpus =
+                run_scaling || (measurement.is_none() && args.scaling.contains(&corpus_name));
             // Scaling needs enough unique input to keep all workers busy
             // without replay. Keep this separate from `chunks` so adding a
             // scaling sweep to the legacy full run cannot silently change its
             // ordinary encode workload.
-            let scaling_chunks = measure_scaling_for_corpus
-                .then(|| chunk(&text, CHUNK_BYTES, usize::MAX));
-            let measure_latency_here = run_latency
-                || (measurement.is_none() && args.latency.contains(&corpus_name));
+            let scaling_chunks =
+                measure_scaling_for_corpus.then(|| chunk(&text, CHUNK_BYTES, usize::MAX));
+            let measure_latency_here =
+                run_latency || (measurement.is_none() && args.latency.contains(&corpus_name));
             let latency_docs = if measure_latency_here {
-                let documents = latency_documents(
-                    &text,
-                    args.latency_bytes,
-                    args.latency_samples,
-                );
+                let documents = latency_documents(&text, args.latency_bytes, args.latency_samples);
                 documents
             } else {
                 Vec::new()
@@ -1482,11 +1624,7 @@ fn main() -> Result<()> {
                         let latency = if latency_docs.is_empty() {
                             None
                         } else {
-                            measure_latency(
-                                engine.as_mut(),
-                                &latency_docs,
-                                args.latency_bytes,
-                            )
+                            measure_latency(engine.as_mut(), &latency_docs, args.latency_bytes)
                         };
 
                         // Stage breakdown on a separate, untimed pass so the
@@ -1526,35 +1664,57 @@ fn main() -> Result<()> {
                         // Multi-thread sweep, only on the corpora asked for.
                         // Runs after the single-thread timing so it can never
                         // perturb the headline number.
-                        let scaling = if let Some(scaling_chunks) = &scaling_chunks {
-                            let make = || ctor(&model).ok();
-                            let pts = tokbench_core::measure_scaling(
-                                &make,
-                                scaling_chunks,
-                                &thread_sweep,
-                                args.reps,
-                            );
-                            if measurement.is_none() && !pts.is_empty() {
-                                let best = pts
-                                    .iter()
-                                    .max_by_key(|point| point.threads)
-                                    .unwrap();
-                                eprintln!(
-                                    "        threads {} -> {:.1} MB/s ({:.0}% of linear)",
-                                    best.threads, best.mbps, best.efficiency_pct
+                        let (scaling, padding_unsupported) = if let Some(scaling_chunks) =
+                            &scaling_chunks
+                        {
+                            // One sweep per padding mode. They are separate
+                            // curves, never merged: an engine can scale well
+                            // ragged and badly padded, and that difference is
+                            // the point of measuring both.
+                            let mut points: Vec<ScalePoint> = Vec::new();
+                            let mut missing: Vec<String> = Vec::new();
+                            for &padding in &padding_modes {
+                                let make = || ctor(&model).ok();
+                                let curve = tokbench_core::measure_scaling(
+                                    &make,
+                                    scaling_chunks,
+                                    &thread_sweep,
+                                    args.reps,
+                                    padding,
                                 );
+                                let Some(curve) = curve else {
+                                    // No native support for this padding mode.
+                                    missing.push(padding.as_str().to_string());
+                                    continue;
+                                };
+                                if measurement.is_none() {
+                                    if let Some(best) =
+                                        curve.points.iter().max_by_key(|point| point.threads)
+                                    {
+                                        eprintln!(
+                                            "        pad {} · threads {} -> {:.1} MB/s ({:.0}% of linear, {} parallelism)",
+                                            curve.padding.as_str(),
+                                            best.threads,
+                                            best.mbps,
+                                            best.efficiency_pct,
+                                            curve.kind.as_str()
+                                        );
+                                    }
+                                }
+                                points.extend(curve.points.iter().map(|point| ScalePoint {
+                                    threads: point.threads,
+                                    mbps: point.mbps,
+                                    efficiency_pct: point.efficiency_pct,
+                                    padding: curve.padding.as_str().to_string(),
+                                    parallelism: curve.kind.as_str().to_string(),
+                                }));
                             }
-                            Some(
-                                pts.into_iter()
-                                    .map(|p| ScalePoint {
-                                        threads: p.threads,
-                                        mbps: p.mbps,
-                                        efficiency_pct: p.efficiency_pct,
-                                    })
-                                    .collect(),
+                            (
+                                (!points.is_empty()).then_some(points),
+                                (!missing.is_empty()).then_some(missing),
                             )
                         } else {
-                            None
+                            (None, None)
                         };
 
                         // A scaling-only run still needs the same correctness
@@ -1647,9 +1807,7 @@ fn main() -> Result<()> {
                             internally_parallel: info.internally_parallel,
                             load_ms,
                             mbps: measured.as_ref().map_or(0.0, |value| value.mbps),
-                            ns_per_byte: measured
-                                .as_ref()
-                                .map_or(0.0, |value| value.ns_per_byte),
+                            ns_per_byte: measured.as_ref().map_or(0.0, |value| value.ns_per_byte),
                             ids_hash: identity
                                 .map(|value| format!("{:016x}", value.ids_hash))
                                 .unwrap_or_default(),
@@ -1661,6 +1819,7 @@ fn main() -> Result<()> {
                             decode_verified: None,
                             decode_unsupported,
                             scaling,
+                            padding_unsupported,
                             reused_text: measured.as_ref().is_some_and(|value| value.reused),
                             latency_p50_us: latency.as_ref().map(|value| value.p50_us),
                             latency_p99_us: latency.as_ref().map(|value| value.p99_us),
@@ -1685,7 +1844,7 @@ fn main() -> Result<()> {
                     }
                     match run_scripted(&args, name, script, &model, corpus_path) {
                         Ok(r) => results.push(r),
-                    Err(e) => eprintln!("  {model_name}/{corpus_name} {name}: {e}"),
+                        Err(e) => eprintln!("  {model_name}/{corpus_name} {name}: {e}"),
                     }
                 }
             }
@@ -1696,9 +1855,7 @@ fn main() -> Result<()> {
             if run_encode || run_scaling {
                 if let Some(reference) = results
                     .iter()
-                    .find(|r| {
-                        r.tokenizer_name == registry::REFERENCE && r.unsupported.is_none()
-                    })
+                    .find(|r| r.tokenizer_name == registry::REFERENCE && r.unsupported.is_none())
                     .map(|r| r.ids_hash.clone())
                 {
                     for r in results.iter_mut().filter(|r| r.unsupported.is_none()) {
@@ -2061,14 +2218,7 @@ mod tests {
             ("scaling", MeasureCommand::Scaling),
         ] {
             let args = Args::try_parse_from([
-                "tokbench",
-                "measure",
-                name,
-                "--engine",
-                "pipeline",
-                "--model",
-                "gpt2",
-                "--corpus",
+                "tokbench", "measure", name, "--engine", "pipeline", "--model", "gpt2", "--corpus",
                 "eng_Latn",
             ])
             .unwrap();
@@ -2105,14 +2255,8 @@ mod tests {
 
     #[test]
     fn parses_all_engines_selector() {
-        let args = Args::try_parse_from([
-            "tokbench",
-            "measure",
-            "encode",
-            "--engine",
-            "all",
-        ])
-        .unwrap();
+        let args =
+            Args::try_parse_from(["tokbench", "measure", "encode", "--engine", "all"]).unwrap();
 
         assert_eq!(args.engine, ["all"]);
         assert!(args.model.is_empty());
@@ -2122,13 +2266,7 @@ mod tests {
     #[test]
     fn parses_scaling_measurement_controls() {
         let args = Args::try_parse_from([
-            "tokbench",
-            "measure",
-            "scaling",
-            "--engine",
-            "pipeline",
-            "--reps",
-            "7",
+            "tokbench", "measure", "scaling", "--engine", "pipeline", "--reps", "7",
         ])
         .unwrap();
 

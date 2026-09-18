@@ -13,3 +13,9 @@ tokbench-core.workspace = true
 # result, and a silent minor bump would silently move the baseline every other
 # engine is compared against.
 tokenizers = { version = "=0.23.1", default-features = false, features = ["onig"] }
+
+# Not a second implementation of the engine's parallelism -- the opposite. `tokenizers`
+# parallelises `encode_batch` over rayon's *current* pool, so sizing that pool is how its
+# own threading is asked for n threads. Without it the only knob is the process-wide
+# RAYON_NUM_THREADS, which cannot vary across a sweep in one process.
+rayon = "1"

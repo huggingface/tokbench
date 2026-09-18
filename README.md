@@ -35,8 +35,11 @@ tokbench fixes the measurement, not the result:
 4. **Warm cache, stated.** One untimed pass precedes the timed ones, so
    cache-heavy engines are measured in the regime real loops reach.
    `--no-warmup` gives the cold contrast.
-5. **One thread by default.** Engines that parallelise internally are flagged;
-   a whole-machine number is never printed next to a single-core one unlabelled.
+5. **One thread by default, and whose thread is stated.** Engines that
+   parallelise internally are flagged; a whole-machine number is never printed
+   next to a single-core one unlabelled. In the scaling sweep the engine's own
+   parallelism is used wherever it has any, and every curve says whether the
+   threads were the engine's (`internal`) or the harness's (`external`).
 6. **Disclose the extra work.** An engine that also computes byte offsets keeps
    that cost in its number, and the report says so next to it.
 7. **Decode gets the same ids, from the reference.** Decode is timed over the
@@ -84,14 +87,36 @@ reports measured and comparable coverage separately. Every raw corpus
 result remains in the JSON. The existing command without `measure` continues
 to run the full benchmark.
 
-Scaling honors `--reps` and consumes the full corpus. Every repetition creates
-fresh per-thread engine instances, warms them on a representative input slice,
-then times each document in the disjoint remainder exactly once. Start and end
-barriers exclude thread-creation and teardown time. Multi-corpus tables report
+Scaling honors `--reps` and consumes the full corpus. Every repetition warms
+fresh engine instances on a representative input slice, then times each
+document in the disjoint remainder exactly once. Multi-corpus tables report
 both the median observed efficiency and its corpus range. After the timed
 sweep, an untimed encode pass hashes each engine's token IDs against the
 reference, so a scaling-only report carries the same correctness gate as
 `measure encode`.
+
+**Whose threads.** The sweep drives each engine's own parallelism wherever the
+engine has any: it asks through `Engine::set_threads` and then calls the
+library's own batch entry point, `Engine::encode_batch`. Re-implementing
+parallelism outside an engine that already has a pool does not measure the
+engine at all -- it leaves that pool idle, or starts one pool per harness
+thread and reports the oversubscription as the engine's scaling. Every curve is
+therefore labelled:
+
+| label | meaning |
+| --- | --- |
+| `internal` | one engine, told to use *n* threads, handed one batch. What a batch caller gets. |
+| `internal`, `n/a @ 0T` | the library fans out but exposes no width knob, so one point at the width it chose. Not a curve: there is no 1-thread baseline, and none is invented. |
+| `external` | the library has no threading of its own, so the harness ran one instance per thread over a shared cursor. A different question -- *n* independent encoders -- and only ever reported under this label. |
+
+**Padding is an axis, not a footnote.** `--padding off|longest|both` (both by
+default) measures each engine ragged and padded to the batch's longest member.
+Padding is a large and uneven cost -- a fill, often a second pass, sometimes a
+different output layout -- and it is a hard requirement for anyone feeding
+rectangular tensors, so the unpadded number alone is not usable for serving.
+The harness never pads on an engine's behalf: an engine with no native padding
+reports `no native padding` for that cell rather than an unpadded number
+wearing a padded label.
 
 ## Hugging Face Jobs
 

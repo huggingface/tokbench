@@ -22,7 +22,8 @@ serde_json.workspace = true
 #
 # tk-encode is edition 2024, so this engine needs a recent toolchain; the rest
 # of the workspace does not.
-tk-encode = { git = "https://github.com/huggingface/tokenizers", rev = "5c3727a93bd64cd9caf0e229c637fc71f2cd2fce", package = "tk-encode", default-features = false, features = [
+tk-encode = { git = "https://github.com/huggingface/tokenizers", rev = "c4e748d4a33a02b687d47668e79599dd1e1e10e9", package = "tk-encode", default-features = false, features = [
+  "parallelism",
   "normalizers",
   "unicode-scripts",
   "bpe",
@@ -34,10 +35,18 @@ tk-encode = { git = "https://github.com/huggingface/tokenizers", rev = "5c3727a9
 # The reader. rc0 has no `Tokenizer::from_file`: building a `PipelineTokenizer`
 # from a `tokenizer.json` is this crate's whole job, and it links no serde.
 #
-# `parallelism` is deliberately NOT enabled, on either crate. The headline is a
-# single-thread number (fairness rule 5), and `Info::internally_parallel: false`
-# below has to stay true.
-tk-serialize = { git = "https://github.com/huggingface/tokenizers", rev = "5c3727a93bd64cd9caf0e229c637fc71f2cd2fce", package = "tk-serialize", default-features = false, features = [
+# `parallelism` IS enabled, on both crates, and that is a reversal worth stating.
+# It used to be off so the headline stayed a single-thread number. But the scaling
+# sweep now drives each engine's own pool (see `core::measure_scaling`), and an
+# engine compiled without its pool can only be threaded from outside -- which is
+# the measurement bug this engine existed to avoid.
+#
+# The headline single-text number is unaffected: `encode_flat` requires
+# `documents.len() > 1`, so one document is never fanned out however many
+# threads the pool has. `Info::internally_parallel` is reported from the thread
+# count actually set, not hardcoded.
+tk-serialize = { git = "https://github.com/huggingface/tokenizers", rev = "c4e748d4a33a02b687d47668e79599dd1e1e10e9", package = "tk-serialize", default-features = false, features = [
+  "parallelism",
   "deserialize",
   "normalizers",
   "unicode-scripts",
@@ -51,4 +60,4 @@ tk-serialize = { git = "https://github.com/huggingface/tokenizers", rev = "5c372
 # 1.0, and rc0's reader is canonical-only (`version: "2.0"`) by design, so a
 # legacy config has to go through here first. This is exactly what upstream's
 # own `tk-serialize` benches do, and it runs at load time, outside the timer.
-tk-convert = { git = "https://github.com/huggingface/tokenizers", rev = "5c3727a93bd64cd9caf0e229c637fc71f2cd2fce", package = "tk-convert" }
+tk-convert = { git = "https://github.com/huggingface/tokenizers", rev = "c4e748d4a33a02b687d47668e79599dd1e1e10e9", package = "tk-convert" }
