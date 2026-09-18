@@ -93,9 +93,19 @@
 mod wired {
     use gigatoken_rs::load_tokenizer::hf::{load_hf_slice, HfTokenizer};
     use gigatoken_rs::EncodeState;
-    use tokbench_core::{Build, Class, Engine, Ids, Info, Model, Unsupported};
+    use tokbench_core::{Build, Class, Engine, Ids, Info, Model, Padding, Unsupported};
 
     pub struct Adapter {
+        /// gigatoken's own batch worker pool, forked per rayon slot. Held for
+        /// the life of the engine because the pool caches one forked
+        /// `Tokenizer` per slot -- rebuilding it per call would measure a
+        /// permanently cold pool.
+        workers: gigatoken_rs::WorkerPool,
+        /// Sized by `set_threads`; `encode_docs_ragged` fans out over rayon's
+        /// current pool, so this is how its width is set. `None` means one
+        /// thread, which takes gigatoken's dedicated serial path instead.
+        pool: Option<rayon::ThreadPool>,
+        threads: usize,
         /// Owns the pretoken cache for the BPE backend, so it survives between
         /// `encode` calls exactly as it would in a user's loop.
         tok: HfTokenizer,
@@ -123,6 +133,9 @@ mod wired {
             let tok = load_hf_slice(&data)
                 .map_err(|e| Unsupported(format!("gigatoken cannot load this config: {e}")))?;
             Ok(Box::new(Adapter {
+                workers: gigatoken_rs::WorkerPool::new(),
+                pool: None,
+                threads: 1,
                 tok,
                 sp_state: EncodeState::new(),
             }))
@@ -142,16 +155,18 @@ mod wired {
                 class: Class::Native,
                 url: "https://github.com/marcelroed/gigatoken",
                 also_computes: "",
-                // See the module docs: the serial per-document entry points used
-                // below never enter gigatoken's rayon batch engine.
-                internally_parallel: false,
+                // The single-document `encode` below is still the serial path.
+                // The scaling sweep goes through `encode_batch`, which is
+                // gigatoken's own rayon batch engine, and this then reports
+                // the width that was actually installed.
+                internally_parallel: self.threads > 1,
             }
         }
 
         fn encode(&mut self, text: &str, out: &mut Ids) {
             // Split the borrow: the SentencePiece call needs `&mut self.tok` and
             // `&mut self.sp_state` at the same time.
-            let Self { tok, sp_state } = self;
+            let Self { tok, sp_state, .. } = self;
             match tok {
                 // Appends `u32` ids straight into `out` — no intermediate Vec, no
                 // conversion. That is the library's own output shape (its batch
@@ -168,6 +183,77 @@ mod wired {
                     });
                 }
             }
+        }
+
+        /// Both backends have one: `encode_docs_ragged` for byte-level BPE,
+        /// `sp_encode_docs_ragged` for SentencePiece. Both are re-exported at
+        /// gigatoken's crate root even though `batch` itself is `pub(crate)`.
+        fn has_native_batch(&self) -> bool {
+            true
+        }
+
+        /// `encode_docs_ragged` fans out over rayon's current pool, so a sized
+        /// pool is how gigatoken's batch engine is asked for `threads`.
+        ///
+        /// One thread is not "a pool of one": gigatoken ships a dedicated
+        /// serial path precisely because touching rayon at all (even
+        /// `current_num_threads()`) builds the global pool. `encode_batch`
+        /// takes that path when `pool` is `None`, which is also the shape its
+        /// own `parallel=false` binding promises.
+        fn set_threads(&mut self, threads: usize) -> bool {
+            if threads == 0 {
+                return false;
+            }
+            // A one-thread POOL, not gigatoken's serial path: that path
+            // (`encode_docs_ragged_serial`) is not re-exported at the crate
+            // root, so it is unreachable from here. A pool of one still pins
+            // the width honestly; it just pays rayon's dispatch, which every
+            // other point on the curve also pays.
+            self.pool = match rayon::ThreadPoolBuilder::new().num_threads(threads).build() {
+                Ok(pool) => Some(pool),
+                // Refuse rather than silently use the global pool, whose width
+                // would then be reported as `threads`.
+                Err(_) => return false,
+            };
+            self.threads = threads;
+            true
+        }
+
+        /// gigatoken's own batch engine: chunks documents at pretoken-safe
+        /// boundaries, encodes with pooled workers, returns one flat id buffer
+        /// plus per-document row lengths. The ids are what tokbench compares,
+        /// so the row lengths are dropped -- the work of producing them is not.
+        fn encode_batch(&mut self, texts: &[&str], out: &mut Ids) {
+            let workers = &self.workers;
+            let run = || match &self.tok {
+                HfTokenizer::Bpe(bpe) => {
+                    let docs: Vec<&[u8]> = texts.iter().map(|t| t.as_bytes()).collect();
+                    gigatoken_rs::encode_docs_ragged(workers, bpe, &docs)
+                }
+                // Takes no `WorkerPool`: it forks its own per chunk.
+                HfTokenizer::SentencePiece(sp) => gigatoken_rs::sp_encode_docs_ragged(sp, texts),
+            };
+            let (flat, _row_lengths) = match &self.pool {
+                Some(pool) => pool.install(run),
+                None => run(),
+            };
+            out.extend_from_slice(&flat);
+        }
+
+        /// Ragged only, from Rust.
+        ///
+        /// gigatoken does pad, and its padding is even parallel, but it lives
+        /// in the pyo3 layer: `bindings::padding::pad_truncate_matrix` is
+        /// private, and the public `encode_batch_matrix` wants a
+        /// `Python<'py>` token and `PyAny` inputs. There is no Rust-callable
+        /// padded batch path, so the padded cell is reported as unsupported
+        /// rather than filled by padding here -- which would measure tokbench's
+        /// fill, not gigatoken's.
+        ///
+        /// Comparing gigatoken padded against the other engines means driving
+        /// it through Python, the way `engines/*/run.py` engines already are.
+        fn set_padding(&mut self, padding: Padding) -> bool {
+            matches!(padding, Padding::Off)
         }
     }
 }
