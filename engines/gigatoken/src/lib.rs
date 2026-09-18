@@ -99,10 +99,36 @@
 //!   evicting (`fn grow`), so it starts near a ~99.3% hit rate and keeps
 //!   everything it sees — its merge path is annotated as running on "~0.7% of"
 //!   pretokens. The pipeline's `WordCache` starts empty and evicts at a fixed
-//!   65,536 slots. That capacity is not the binding constraint, though:
-//!   raising it to 262,144 moves one thread from 244 to 258 MB/s, inside
-//!   noise, even though english.txt has 105,627 distinct words. Zipf means the
-//!   tail it evicts is the part it would not have hit again.
+//!   65,536 slots.
+//!
+//!   **Most of the English gap is that size difference, not the design.** Cap
+//!   both at the same slot count (gpt2, one thread, realistic warm) and it
+//!   very nearly closes:
+//!
+//!   | slots | gigatoken | pipeline | giga/pipeline |
+//!   | --- | --- | --- | --- |
+//!   | 65,536 | 259.5 | 230.8 | **1.12x** |
+//!   | 262,144 | 387.3 | 239.4 | 1.62x |
+//!
+//!   At equal memory gigatoken's 1.47x lead becomes 1.12x. What the second row
+//!   shows is the design difference that does matter, and it is not the probe
+//!   layout: **gigatoken turns capacity into throughput and the pipeline does
+//!   not.** Four times the slots is +49% for gigatoken (259.5 -> 387.3) and
+//!   +4% for the pipeline (230.8 -> 239.4).
+//!
+//!   So "65,536 is not the binding constraint" is the wrong reading of the
+//!   pipeline's flat response to more memory. The constraint is that a 16-slot
+//!   window that evicts on collision cannot use more memory; a growing
+//!   open-addressed table that never evicts can. Zipf makes eviction cheap in
+//!   hit rate, and that is exactly why raising the capacity alone buys nothing
+//!   without changing how the table grows.
+//!
+//!   Caveat on the method: capping gigatoken makes it a bounded *first-come*
+//!   cache (inserts refused at the 3/4 load where it would have doubled) while
+//!   the pipeline evicts on collision. Equal memory, different retention. On a
+//!   Zipf workload first-come is roughly fine -- frequent items arrive early --
+//!   but the ~50k vocab seed eats most of a 65,536-slot budget before the
+//!   corpus gets any, which if anything understates gigatoken on that row.
 //!
 //!   **And it is a property of the language, not of the engine.** English
 //!   pretokens recur about 8x (105,627 unique of 876,601); Chinese ones about
@@ -118,8 +144,18 @@
 //!   On Chinese the pipeline's cache is worth nothing at all (1.01x) and
 //!   gigatoken's is worth 3.58x — so with a realistic warm gigatoken drops
 //!   *below* the pipeline, which wins by 1.37x. The English advantage is real
-//!   but it belongs to the corpus. Ids on the Chinese rows are unverified:
-//!   that run carried no reference engine.
+//!   but it belongs to the corpus.
+//!
+//!   Equal slot counts change nothing there, which is the point: neither
+//!   engine can cache what does not recur.
+//!
+//!   | slots | gigatoken | pipeline | giga/pipeline |
+//!   | --- | --- | --- | --- |
+//!   | 65,536 | 56.3 | 86.0 | 0.65x |
+//!   | 262,144 | 61.0 | 84.6 | 0.72x |
+//!
+//!   Four times the slots is +8% for gigatoken and -2% for the pipeline. Ids
+//!   verified against `tokenizers 0.23.1` in all four cells.
 //!
 //!   The cache lives on the `Tokenizer`/`EncodeState` this struct owns, so it
 //!   persists across `encode` calls. `tokbench_core::measure` walks the whole corpus once
