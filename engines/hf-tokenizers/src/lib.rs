@@ -19,15 +19,36 @@
 
 use std::time::Instant;
 
-use tokbench_core::{unsupported, Build, Class, Engine, Ids, Info, Model, Phases, Unsupported};
+use tokbench_core::{
+    unsupported, Build, Class, Engine, Ids, Info, Model, Padding, Phases, Unsupported,
+};
 use tokenizers::tokenizer::{Model as _, Normalizer as _, PostProcessor as _, PreTokenizer as _};
 use tokenizers::{NormalizedString, OffsetType, PreTokenizedString, Tokenizer};
 
 pub struct Adapter {
     tok: Tokenizer,
+    /// Sized by `set_threads`; `encode_batch` runs inside it. `None` means one
+    /// thread, where a pool would only add overhead.
+    pool: Option<rayon::ThreadPool>,
+    threads: usize,
 }
 
 impl Build for Adapter {
+    /// `BpeBuilder::cache_capacity` exists, but it is builder-only: the field
+    /// is absent from `models/bpe/serialization.rs`, so a `tokenizer.json`
+    /// cannot carry it and `Tokenizer::from_file` -- the only constructor this
+    /// adapter uses -- has no way to pass it. Disabling the cache would mean
+    /// pulling vocab and merges back out of the loaded model and rebuilding
+    /// the BPE through the builder, which is a different construction path
+    /// from the one every other number in this row was measured on.
+    fn build_without_cache(_model: &Model) -> Result<Box<dyn Engine>, Unsupported> {
+        Err(Unsupported(
+            "0.23.1 takes cache_capacity only through BpeBuilder, and the field is not in the \
+             model config, so from_file cannot ask for it"
+                .into(),
+        ))
+    }
+
     fn build(model: &Model) -> Result<Box<dyn Engine>, Unsupported> {
         let path = model.tokenizer_json();
         if !path.exists() {
@@ -38,7 +59,11 @@ impl Build for Adapter {
         }
         let tok = Tokenizer::from_file(&path)
             .map_err(|e| Unsupported(format!("tokenizers cannot load this config: {e}")))?;
-        Ok(Box::new(Adapter { tok }))
+        Ok(Box::new(Adapter {
+            tok,
+            pool: None,
+            threads: 1,
+        }))
     }
 }
 
@@ -51,7 +76,8 @@ impl Engine for Adapter {
             class: Class::Native,
             url: "https://github.com/huggingface/tokenizers",
             also_computes: "byte offsets, word ids, attention mask",
-            internally_parallel: false,
+            // Reported from the thread count actually installed, not declared.
+            internally_parallel: self.threads > 1,
         }
     }
 
@@ -61,6 +87,64 @@ impl Engine for Adapter {
         if let Ok(enc) = self.tok.encode(text, false) {
             out.extend_from_slice(enc.get_ids());
         }
+    }
+
+    fn has_native_batch(&self) -> bool {
+        true
+    }
+
+    /// Two knobs, both the library's own, and both required.
+    ///
+    /// `set_parallelism` is the flag `maybe_par_iter` consults: with it off,
+    /// `encode_batch` runs serially however many threads are available. The
+    /// rayon pool is then what decides *how many* -- `encode_batch`
+    /// parallelises over the current pool, so installing a sized pool is how
+    /// this library is asked for exactly `threads`. The alternative,
+    /// `RAYON_NUM_THREADS`, is process-wide and cannot vary across a sweep.
+    fn set_threads(&mut self, threads: usize) -> bool {
+        if threads == 0 {
+            return false;
+        }
+        tokenizers::utils::parallelism::set_parallelism(threads > 1);
+        self.pool = if threads > 1 {
+            match rayon::ThreadPoolBuilder::new().num_threads(threads).build() {
+                Ok(pool) => Some(pool),
+                // Refuse rather than quietly run on the global pool, which
+                // would report some other width as `threads`.
+                Err(_) => return false,
+            }
+        } else {
+            None
+        };
+        self.threads = threads;
+        true
+    }
+
+    /// `Tokenizer::encode_batch` — the library's own batch path, and the only
+    /// one that touches its rayon fan-out.
+    fn encode_batch(&mut self, texts: &[&str], out: &mut Ids) {
+        let encode = || self.tok.encode_batch(texts.to_vec(), false);
+        let encoded = match &self.pool {
+            Some(pool) => pool.install(encode),
+            None => encode(),
+        };
+        if let Ok(encodings) = encoded {
+            for encoding in &encodings {
+                out.extend_from_slice(encoding.get_ids());
+            }
+        }
+    }
+
+    /// `with_padding` — `PaddingParams::default()` is already `BatchLongest`,
+    /// which is exactly [`Padding::Longest`].
+    fn set_padding(&mut self, padding: Padding) -> bool {
+        match padding {
+            Padding::Off => self.tok.with_padding(None),
+            Padding::Longest => self
+                .tok
+                .with_padding(Some(tokenizers::PaddingParams::default())),
+        };
+        true
     }
 
     /// `skip_special_tokens = false` to match `encode`'s
