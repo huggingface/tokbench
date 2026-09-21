@@ -2,7 +2,7 @@
 pretty_name: tokbench corpora
 license: other
 license_name: mixed-per-corpus
-license_link: "#provenance-and-licences"
+license_link: https://huggingface.co/datasets/huggingface/tokbench-corpora#provenance-and-licences
 language:
   - am
   - ar

@@ -11,8 +11,8 @@ use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use serde::{Deserialize, Serialize};
 use tokbench_core::{
-    chunk, measure, measure_decode, measure_latency, measure_scaling_with_mode, Ids, Model,
-    ScalingMode,
+    chunk, measure, measure_decode, measure_latency, measure_scaling_with_mode, synth_recurrence,
+    vocabulary, Ids, Model, ScalingMode,
 };
 
 const CHUNK_BYTES: usize = 10 * 1024;
@@ -26,6 +26,7 @@ enum MeasureCommand {
     Scaling,
     Memory,
     CrateSize,
+    Recurrence,
 }
 
 #[derive(Subcommand, Debug)]
@@ -74,6 +75,14 @@ struct Args {
 
     #[arg(long, default_value = "tokenizer_bench_results.json", global = true)]
     out: PathBuf,
+
+    /// Pretoken recurrence rates swept by `measure recurrence`.
+    #[arg(long, value_delimiter = ',', default_values_t = [1.0, 4.0, 16.0, 64.0, 256.0], global = true)]
+    recurrence: Vec<f64>,
+
+    /// Bytes of synthetic text per recurrence point.
+    #[arg(long, default_value_t = 2 * 1024 * 1024, global = true)]
+    recurrence_bytes: usize,
 
     #[arg(long, global = true)]
     open: bool,
@@ -433,7 +442,7 @@ fn print_collapsed_measurement_table(
     }
     headers.push("corpora".into());
     match measurement {
-        MeasureCommand::Encode => {
+        MeasureCommand::Encode | MeasureCommand::Recurrence => {
             headers.extend(["median MB/s", "median ns/B"].map(str::to_string))
         }
         MeasureCommand::Decode => {
@@ -489,7 +498,7 @@ fn print_collapsed_measurement_table(
             row.push(engine);
         }
         match measurement {
-            MeasureCommand::Encode => {
+            MeasureCommand::Encode | MeasureCommand::Recurrence => {
                 let complete: Vec<_> = entries
                     .iter()
                     .filter(|(result, _)| result.unsupported.is_none())
@@ -886,14 +895,105 @@ fn pivot_engine_columns(
     (pivoted_headers, pivoted_rows)
 }
 
+/// The recurrence sweep is a curve, so it gets its own shape: one row per
+/// rate in ascending numeric order, one column per engine. The generic table
+/// would either take a median over the rates -- the one number this
+/// measurement exists to avoid -- or pivot them into columns sorted as text,
+/// which puts 377.3x before 4.4x.
+fn print_recurrence_table(runs: &[Run]) {
+    let rate_of = |corpus: &str| -> f64 {
+        corpus
+            .trim_start_matches("rec")
+            .trim_end_matches('x')
+            .parse()
+            .unwrap_or(f64::NAN)
+    };
+
+    let mut engines: Vec<&str> = Vec::new();
+    for run in runs {
+        for r in &run.results {
+            if !engines.contains(&r.tokenizer_name.as_str()) {
+                engines.push(&r.tokenizer_name);
+            }
+        }
+    }
+
+    let mut ordered: Vec<&Run> = runs.iter().collect();
+    ordered.sort_by(|a, b| {
+        rate_of(&a.dataset_metadata.corpus)
+            .partial_cmp(&rate_of(&b.dataset_metadata.corpus))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    // An engine that ran no cell here would be a column of dashes. Most of the
+    // `-no-cache` twins are exactly that, and they crowd out the curve.
+    engines.retain(|engine| {
+        runs.iter().any(|run| {
+            run.results
+                .iter()
+                .any(|r| r.tokenizer_name == *engine && r.unsupported.is_none())
+        })
+    });
+
+    let mut headers = vec![
+        "model".to_string(),
+        "recurrence".to_string(),
+        // The audit column. Only repetition is supposed to vary across the
+        // sweep; if tokens per kB drifts, the corpora differ in more than that
+        // and the curve is not about caching. Keep an eye on it.
+        "tok/kB".to_string(),
+    ];
+    headers.extend(engines.iter().map(|e| format!("{e} MB/s")));
+
+    let rows: Vec<Vec<String>> = ordered
+        .iter()
+        .map(|run| {
+            let density = run
+                .results
+                .iter()
+                .find(|r| r.unsupported.is_none() && r.total_tokens_produced > 0)
+                .map(|r| {
+                    r.total_tokens_produced as f64
+                        / (run.dataset_metadata.file_size_bytes as f64 / 1024.0)
+                });
+            let mut row = vec![
+                run.dataset_metadata.model.clone(),
+                format!("{:.1}x", rate_of(&run.dataset_metadata.corpus)),
+                density.map_or_else(|| "-".into(), |d| format!("{d:.0}")),
+            ];
+            for engine in &engines {
+                let cell = run
+                    .results
+                    .iter()
+                    .find(|r| r.tokenizer_name == *engine)
+                    .map(|r| match (&r.unsupported, r.verified) {
+                        (Some(_), _) => "-".to_string(),
+                        // An unverified cell is not a comparable number.
+                        (None, Some(false)) => format!("{:.0} differ", r.mbps),
+                        _ => format!("{:.0}", r.mbps),
+                    })
+                    .unwrap_or_else(|| "-".into());
+                row.push(cell);
+            }
+            row
+        })
+        .collect();
+
+    print_table(headers, rows, 3, false);
+}
+
 fn print_measurement_table(runs: &[Run], measurement: MeasureCommand, compare_to: Option<&str>) {
+    if measurement == MeasureCommand::Recurrence {
+        print_recurrence_table(runs);
+        return;
+    }
     let show_corpus = runs
         .iter()
         .map(|run| run.dataset_metadata.corpus.as_str())
         .collect::<std::collections::BTreeSet<_>>()
         .len()
         > 1;
-    if show_corpus {
+    if show_corpus && measurement != MeasureCommand::Recurrence {
         print_collapsed_measurement_table(runs, measurement, compare_to);
         return;
     }
@@ -911,13 +1011,19 @@ fn print_measurement_table(runs: &[Run], measurement: MeasureCommand, compare_to
 
     let mut headers = vec!["model".to_string()];
     if show_corpus {
-        headers.push("corpus".to_string());
+        headers.push(if measurement == MeasureCommand::Recurrence {
+            "recurrence".to_string()
+        } else {
+            "corpus".to_string()
+        });
     }
     if show_engine {
         headers.push("engine".to_string());
     }
     match measurement {
-        MeasureCommand::Encode => headers.extend(["MB/s", "ns/B", "tokens"].map(str::to_string)),
+        MeasureCommand::Encode | MeasureCommand::Recurrence => {
+            headers.extend(["MB/s", "ns/B", "tokens"].map(str::to_string))
+        }
         MeasureCommand::Decode => headers.extend(["MB/s", "ns/token"].map(str::to_string)),
         MeasureCommand::Latency => {
             headers.extend(["p50 us", "p99 us", "samples"].map(str::to_string))
@@ -968,14 +1074,22 @@ fn print_measurement_table(runs: &[Run], measurement: MeasureCommand, compare_to
             });
             let mut row = vec![run.dataset_metadata.model.clone()];
             if show_corpus {
-                row.push(run.dataset_metadata.corpus.clone());
+                let corpus = &run.dataset_metadata.corpus;
+                row.push(if measurement == MeasureCommand::Recurrence {
+                    corpus
+                        .trim_start_matches("rec")
+                        .trim_start_matches('0')
+                        .to_string()
+                } else {
+                    corpus.clone()
+                });
             }
             if show_engine {
                 row.push(result.tokenizer_name.clone());
             }
             let unsupported = result.unsupported.as_deref();
             match measurement {
-                MeasureCommand::Encode => {
+                MeasureCommand::Encode | MeasureCommand::Recurrence => {
                     row.push(
                         unsupported.map_or_else(|| format!("{:.1}", result.mbps), |_| "-".into()),
                     );
@@ -1298,7 +1412,9 @@ fn main() -> Result<()> {
     if measurement == Some(MeasureCommand::CrateSize) {
         return measure_crate_size(&args);
     }
-    let run_encode = measurement.is_none() || measurement == Some(MeasureCommand::Encode);
+    let run_recurrence = measurement == Some(MeasureCommand::Recurrence);
+    let run_encode =
+        measurement.is_none() || measurement == Some(MeasureCommand::Encode) || run_recurrence;
     let run_decode = match measurement {
         Some(command) => command == MeasureCommand::Decode,
         None => !args.no_decode,
@@ -1366,6 +1482,53 @@ fn main() -> Result<()> {
             args.corpora.display()
         );
     }
+
+    // `measure recurrence` does not benchmark the selected corpora; it uses
+    // their vocabulary to synthesize new ones at controlled repetition rates,
+    // then runs the ordinary encode path over those. Reusing the encode path
+    // is what keeps the verification gate, the disjoint slices and the medians
+    // identical to every other number in the report.
+    let _synth_dir;
+    let corpora = if run_recurrence {
+        let source: String = corpora
+            .iter()
+            .filter_map(|p| std::fs::read_to_string(p).ok())
+            .collect::<Vec<_>>()
+            .join(" ");
+        let vocab = vocabulary(&source);
+        if vocab.is_empty() {
+            bail!("the selected corpora contain no words to draw a vocabulary from");
+        }
+        let dir = std::env::temp_dir().join(format!("tokbench-recurrence-{}", std::process::id()));
+        std::fs::create_dir_all(&dir)?;
+        let mut out = Vec::new();
+        for (i, &rate) in args.recurrence.iter().enumerate() {
+            if rate < 1.0 {
+                bail!("--recurrence values are pretokens per distinct pretoken, so >= 1");
+            }
+            let (text, got) =
+                synth_recurrence(&vocab, rate, args.recurrence_bytes, 0x9E37 + i as u64);
+            // Named by the rate ACHIEVED, not the one requested: the corpus
+            // stem is what every table and the JSON key off.
+            let path = dir.join(format!("rec{got:08.1}x.txt"));
+            std::fs::write(&path, &text)?;
+            eprintln!(
+                "  synthesized {} — {:.1}x recurrence over {} distinct words, {:.1} MB",
+                stem(&path),
+                got,
+                vocab
+                    .len()
+                    .min((args.recurrence_bytes as f64 / 7.0 / rate).ceil() as usize),
+                text.len() as f64 / (1024.0 * 1024.0)
+            );
+            out.push(path);
+        }
+        _synth_dir = Some(dir);
+        out
+    } else {
+        _synth_dir = None;
+        corpora
+    };
     if run_memory_atomic && (args.corpus.len() != 1 || corpora.len() != 1) {
         bail!("`tokbench measure memory` requires exactly one explicit --corpus");
     }
@@ -1468,6 +1631,7 @@ fn main() -> Result<()> {
     if let Some(measurement) = measurement {
         let name = match measurement {
             MeasureCommand::Encode => "encode",
+            MeasureCommand::Recurrence => "recurrence",
             MeasureCommand::Decode => "decode",
             MeasureCommand::Latency => "latency",
             MeasureCommand::Scaling => "scaling",
