@@ -1,0 +1,51 @@
+[package]
+name = "tokenizers-crate-size-probe"
+version = "0.0.0"
+edition = "2024"
+
+[[bin]]
+name = "tokenizers-crate-size-probe"
+path = "src/main.rs"
+
+[[bin]]
+name = "tokenizers-feature-size-probe"
+path = "src/feature_main.rs"
+
+[dependencies]
+ahash = "0.8.12"
+tk-encode = { path = "__TOKENIZERS__/tk-encode", default-features = false, features = ["bpe"] }
+tk-serialize = { path = "__TOKENIZERS__/tk-serialize", default-features = false, features = ["bpe", "deserialize"], optional = true }
+tk-convert = { path = "__TOKENIZERS__/tk-convert", default-features = false, optional = true }
+tk-train = { path = "__TOKENIZERS__/tk-train", default-features = false, optional = true }
+
+[features]
+default = []
+bpe = ["tk-encode/bpe"]
+serialize = ["dep:tk-serialize"]
+convert = ["dep:tk-convert"]
+train = ["dep:tk-train", "tk-encode/wordlevel"]
+unigram = ["tk-encode/unigram"]
+wordpiece = ["tk-encode/wordpiece"]
+wordlevel = ["tk-encode/wordlevel"]
+normalizers = ["tk-encode/normalizers"]
+unicode-scripts = ["tk-encode/unicode-scripts"]
+parallelism = ["tk-encode/parallelism"]
+
+[profile.minsize]
+inherits = "release"
+opt-level = "z"
+codegen-units = 1
+panic = "abort"
+lto = "fat"
+strip = true
+
+[profile.slimest]
+inherits = "minsize"
+
+[[package.metadata.cargo-matrix.channel]]
+name = "default"
+
+[[package.metadata.cargo-matrix.channel]]
+name = "sizes"
+seed = ["unigram", "wordpiece", "wordlevel", "normalizers", "unicode-scripts", "parallelism"]
+always_include = ["bpe"]

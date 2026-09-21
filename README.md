@@ -77,9 +77,11 @@ cargo run --release -p tokbench --features rust-engines -- \
 cargo run --release -p tokbench --features rust-engines -- \
   measure memory --engine all --corpus eng_Latn --threads 8 \
   --scaling-mode independent-instances
+cargo run --release -p tokbench -- \
+  measure crate-size
 ```
 
-Each command writes the normal tokbench JSON schema. It runs only the requested
+The runtime commands write the normal tokbench JSON schema. Each runs only the requested
 measurement family and skips phase breakdown and decode when they were not
 requested. Memory is its own isolated child-process measurement and requires
 exactly one explicit corpus. Interactive runs show one in-place progress bar
@@ -94,6 +96,26 @@ Comparison values are medians of matched paired per-corpus ratios. The table
 reports measured and comparable coverage separately. Every raw corpus
 result remains in the JSON. The existing command without `measure` continues
 to run the full benchmark.
+
+`measure crate-size` is a build measurement, so it does not load engines or
+corpora. It writes `crate_sizes.json` and measures separately linked, stripped,
+gzip-compressed executables for every selectable tokenizers v1 crate and
+`tk-encode` feature configuration. It runs the complete `minsize` and `slimest`
+matrices. The latter rebuilds `std` with `panic_immediate_abort`. Install the
+pinned build tools before running it:
+
+```bash
+cargo install cargo-matrix --version 0.4.5 --locked
+rustup toolchain install 1.97.1 --profile minimal
+rustup toolchain install nightly-2026-08-05 --profile minimal --component rust-src
+```
+
+By default the command downloads the pinned tokenizers revision and uses the
+GPT-2 fixture only to prove that the linked pre-split executable can load a real
+configuration. `--tokenizers-source ../tokenizers` measures a local checkout,
+`--model NAME` changes that load fixture, and `--out PATH` changes the output.
+The report records both tokenizers revisions, both Rust versions, the platform,
+the cargo-matrix version and the generated Cargo lockfile hash.
 
 The tokenizers v1 pipeline BPE cache can be sized explicitly for an ablation:
 
