@@ -44,52 +44,43 @@ tokbench fixes the measurement, not the result:
 
 ## The corpus is the experiment
 
-This is the part that matters most, and the part that is easiest to get wrong.
+**Throughput is not a property of the tokenizer. It is a property of the
+tokenizer and the text.** Every fast BPE implementation caches pretokens, so
+throughput tracks how often the input repeats itself. `pipeline` / gpt2, one
+thread, median of 9, three runs — the only thing changed is the cache:
 
-**A tokenizer's throughput is not a property of the tokenizer.** It is a
-property of the tokenizer *and the text*. Every fast BPE implementation caches
-pretokens — it looks up "have I already merged this word?" before doing any
-work — so throughput tracks how often the input repeats itself. Measured here
-on `pipeline` / gpt2, sweeping only the cache size and changing nothing else:
+| corpus | cache on | cache off | cache is worth | heap on | heap off |
+|---|---:|---:|---:|---:|---:|
+| code | 302 | 203 | **1.50×** | 7.2 MB | 3.6 MB |
+| japanese | 74 | 73 | 1.02× | 9.2 MB | 3.7 MB |
+| chinese | 92 | 89 | 1.04× | 11.5 MB | 3.7 MB |
+| english | 217 | 236 | **0.92×** | 7.2 MB | 3.6 MB |
 
-| cache slots | english | code | japanese | chinese |
-|---|---:|---:|---:|---:|
-| 0 (disabled) | 237 | 204 | 74 | 92 |
-| 1 024 | 200 | 235 | 76 | 95 |
-| 65 536 (default) | 220 | **307** | 72 | 96 |
-| **cache is worth** | ~1.0× | **1.50×** | ~1.0× | ~1.0× |
+The cache is worth 50% on source code, where identifiers and indentation recur
+constantly. On Chinese and Japanese it buys nothing and costs 5–8 MB, because
+pretokens barely recur there. On English it is **a net loss** — the lookup
+costs more than the merges it skips.
 
-Same engine, same vocabulary, same clock. The cache is worth 50% on source
-code, where identifiers and indentation recur constantly, and **nothing at all
-on Chinese and Japanese**, where pretokens barely recur — there are only so
-many distinct words in English prose, and effectively no reusable pretokens in
-unsegmented CJK. (English sits inside this cell's ~10% run-to-run variance.)
+The heap columns are not decoration. They are what proves the cache was
+actually off: asking a third-party library to drop its cache is a request, and
+a library that ignores it returns a perfectly ordinary-looking number. That
+happened here — `pipeline-no-cache` reported the cached engine for as long as
+the config reader dropped `cache_capacity` on the floor. The driver now refuses
+to call a row an ablation unless the cache-free half holds less live heap than
+its twin (`cache_ablation_verified`). Three things follow:
 
-Three consequences follow, and they are the whole design:
+**An unbounded cache measures repetition, not tokenization.** gigatoken seeds
+~50k entries and doubles rather than evicting, and posts extraordinary numbers.
+Production traffic is not a corpus you encode twice.
 
-**1. An unbounded cache is a benchmark result, not a product.** An engine that
-never evicts — gigatoken seeds ~50k vocab entries at construction and its table
-doubles rather than evicting — posts extraordinary numbers, and they are real
-numbers about a real cache. But they describe a workload that has already been
-seen. Production traffic is not a corpus you encode twice. The moment the text
-stops repeating, the cache stops paying, and the ranking inverts: on CJK the
-same engines that dominate English fall behind. Quote a cached number without
-its cache state and its corpus, and you have not reported a result.
+**So no timed pass ever sees text twice.** The corpus is cut into `reps + 1`
+disjoint slices; slice 0 warms, each rep gets unseen text. Warming on the
+chunks the reps then re-encode overstated gigatoken by **256×** (llama-2/dense)
+and barely moved a word-granularity cache — indistinguishable from outside.
+`--no-warmup` times the cold first pass.
 
-**2. So the harness never lets a timed pass see text twice.** The corpus is cut
-into `reps + 1` **disjoint** slices: slice 0 warms the engine, and every timed
-rep gets text the engine has never encountered. That is also the honest regime
-— a real server is a warm process handed a new document. An earlier version
-warmed on the same chunks it then re-timed, and a document-granularity cache
-turned that into a **256× overstatement** (gigatoken on llama-2/dense) while a
-word-granularity cache barely moved. Nothing from the outside distinguishes the
-two, which is exactly why the harness has to remove the choice.
-`--no-warmup` times only the genuinely cold first pass.
-
-**3. So the corpora are mixed on purpose, and English is never the headline.**
-`data/fixtures/` carries 14 scripts plus code, maths, agent traces and
-special-token-dense text, because the spread between them is larger than the
-spread between engines. On llama-3, one engine and one thread:
+**So the corpora are mixed, and English is never the headline.** 14 scripts
+plus code, maths, agent traces and special-token-dense text. On llama-3:
 
 | engine | english | greek | chinese | english/chinese |
 |---|---:|---:|---:|---:|
@@ -97,12 +88,10 @@ spread between engines. On llama-3, one engine and one thread:
 | wordchipper | 89 | 50 | 44 | 2.0× |
 | tokie | 79 | 21 | 9 | **8.5×** |
 
-An English-only benchmark would rank these three in an order that reverses on
-Chinese. Sweep at least one Latin and one CJK corpus before quoting anything.
+An English-only benchmark ranks these three in an order that reverses on CJK.
 
-**Equal ground.** Cross-engine medians are computed **only over cells every
-compared engine ran and verified**. Engines cover different model families, so
-a median over each engine's own cells silently rewards the ones that skip the
+**Equal ground.** Cross-engine medians are computed only over cells every
+compared engine ran and verified, or the median rewards engines that skip the
 hard cases.
 
 ## Measuring
@@ -157,15 +146,13 @@ Every family writes the same JSON schema and keeps all raw per-corpus results;
 the table is a median summary. Interactive runs show a progress bar, redirected
 output does not. `measure memory` requires exactly one explicit `--corpus`.
 
-**Decode** reports two rates because one number cannot answer both questions:
-`decode_mbps` is text produced, on the same axis as encode; `decode_ns_per_token`
-is the input-side cost, which is the one to compare when two engines emit text
-of different lengths from the same ids. Correctness is checked one level along
-— the decoded *text* is hashed against the reference's decoded text, not
-against the original corpus, because a lowercasing or accent-stripping
-normalizer makes `decode(encode(t)) != t` for a perfectly correct tokenizer.
-An engine with no decode entry point reports `decode_unsupported` and is absent
-from the decode ranking rather than scored zero in it.
+**Decode** reports two rates: `decode_mbps` (text produced, same axis as
+encode) and `decode_ns_per_token` (input-side cost — the one to compare when
+two engines emit different amounts of text from the same ids). The decoded
+*text* is hashed against the reference's decoded text, not against the original
+corpus: a lowercasing normalizer makes `decode(encode(t)) != t` for a correct
+tokenizer. No decode entry point means `decode_unsupported`, absent from the
+ranking rather than scored zero in it.
 
 **Scaling** labels who supplied the threads. `--scaling-mode auto` drives the
 engine's own threads where it has them and otherwise runs independent
@@ -178,18 +165,17 @@ instances:
 | `independent-instances` | *n* single-threaded instances in one process, fed by a shared cursor. |
 
 **Padding is an axis, not a footnote.** `--padding off|longest|both` (both by
-default). Padding is a large, uneven, and mandatory cost for anyone feeding
-rectangular tensors, so the unpadded number alone is not usable for serving.
-The harness never pads on an engine's behalf: an engine with no native padding
-reports `no native padding` rather than an unpadded number wearing a padded
-label.
+default). It is a large, uneven, mandatory cost for anyone feeding rectangular
+tensors. The harness never pads on an engine's behalf: no native padding means
+`no native padding`, not an unpadded number wearing a padded label.
 
-**Cache ablation.** `--cache-capacity N` sizes the tokenizers v1 pipeline BPE
-cache; `0` disables it. Omitting it keeps the upstream default of 65 536. The
-value is recorded as `dataset_metadata.pipeline_cache_capacity`. Every engine
-is also registered a second time as `<name>-no-cache`; engines with no way to
-disable their caches report `unsupported` there rather than a number that
-invites a wrong subtraction.
+**Cache ablation.** `--cache-capacity N` sizes the tokenizers v1 BPE cache,
+`0` disables it, omitting it keeps the upstream 65 536. Every engine is also
+registered as `<name>-no-cache`; one with no way to disable its cache reports
+`unsupported` there rather than a number that invites a wrong subtraction. When
+both halves of a pair are measured, `cache_ablation_verified` records whether
+the cache-free half actually held less live heap — a row that did not is not an
+ablation result, whatever it measured.
 
 ## Example results
 
@@ -258,12 +244,11 @@ blank.
 | [executorch](engines/executorch) | C++ | cffi | must run in its own process: its static PCRE2 preempts fastokens' and silently degrades it ~18× with correct ids, which no verification gate would catch |
 
 `pipeline` and `hf-tokenizers` are **the same project reading the same
-`tokenizer.json`**, so the difference between them is the encode path and
-nothing else. Every other pairing compares across projects, where a gap could
-come from the vocabulary, the pre-tokenizer, or a different idea of what a
-token is. That also makes the verification column load-bearing rather than
-decorative: a rewritten merge loop is exactly the change that can be fast and
-subtly wrong on one script, so a mismatch there is a bug report, not a result.
+`tokenizer.json`**, so the gap between them is the encode path and nothing
+else. Every other pairing compares across projects, where a gap could come from
+the vocabulary or a different idea of what a token is. It also makes the
+verification column load-bearing: a rewritten merge loop is exactly the change
+that is fast and subtly wrong on one script.
 
 **Decode** is wired for `hf-tokenizers`, `pipeline`, `tokie`, `tiktoken` and
 `fastokens`. The rest report `decode_unsupported`. That is one method per
@@ -294,15 +279,13 @@ Three different questions, none a substitute for another:
 - **`crate_size_kb`** — the published package you download. `scripts/package_size.py`.
 - **`binary_delta_kb`** — stripped bytes added to a minimal program over a
   no-engine baseline. `scripts/binsize.sh`.
-- **`heap_load_mb` / `heap_encode_mb`** — live heap after loading, and after
-  encoding with caches populated. Measured in a dedicated child process per
-  engine: in one process the allocator hands engine B the pages engine A freed
-  and reports B's footprint as ~0. Live heap, not RSS — RSS is a high-water
-  mark that never falls, so it bills a loader for an intermediate it already
-  freed.
+- **`heap_load_mb` / `heap_encode_mb`** — live heap after load, and after
+  encode with caches populated. One child process per engine, because in one
+  process the allocator hands engine B the pages engine A freed. Live heap, not
+  RSS: RSS is a high-water mark that bills a loader for what it already freed.
 
-The footprint pass runs after all timing is complete. Interleaved, its ~12
-child processes per cell evict the next cell's warm pages.
+The footprint pass runs after all timing. Interleaved, its ~12 child processes
+per cell evict the next cell's warm pages.
 
 ## Output
 
@@ -318,7 +301,7 @@ The driver writes `tokenizer_bench_results.json`:
       "engine_class": "native", "verified": true, "ids_hash": "47cdd1399a60de5a",
       "decode_mbps": 412.7, "decode_ns_per_token": 9.8,
       "decode_text_hash": "b3f1c0a29e4d5107", "decode_verified": true,
-      "heap_load_mb": 45.4, "crate_size_kb": 181.0 }
+      "heap_load_mb": 3.5, "heap_encode_mb": 7.2, "crate_size_kb": 181.0 }
   ],
   "runs": [ "...one entry per model × corpus cell..." ]
 }
@@ -344,29 +327,29 @@ impl Engine for Adapter {
 }
 ```
 
-Use the library's ordinary public API — the one a user would call. If it forces
-an allocation or a type conversion, that cost stays in the measurement, because
-the user pays it too. Reaching into private internals to skip work the public
-path performs is out of bounds.
+Use the library's ordinary public API — the one a user would call. An
+allocation or conversion it forces stays in the measurement, because the user
+pays it too. Reaching into private internals to skip work the public path does
+is out of bounds.
 
-`decode` is the one method that may decline: the default returns `Unsupported`,
-which keeps the engine out of the decode ranking instead of scoring it zero
-there. Return `Err` rather than pushing a short string when an id cannot be
-mapped — a truncated `out` would otherwise hash as a fast, wrong decode.
+`decode` may decline: the default returns `Unsupported`. Return `Err` rather
+than pushing a short string when an id cannot be mapped, or a truncated `out`
+hashes as a fast, wrong decode.
 
 ## No benchmarking framework
 
-Deliberate, and it is *less* code. `divan` has no machine-readable output.
-`criterion`'s `estimates.json` is a documented private implementation detail,
-needs `cargo-criterion` plus `harness = false`, and owns `fn main()`. Neither
-expresses an engine × model × corpus matrix, and neither verifies that two
-engines produced the same ids — the property the whole comparison rests on.
-The measurement is a few dozen lines in `tokbench_core`, shared by every engine.
+Deliberate, and it is *less* code. `divan` has no machine-readable output;
+`criterion`'s `estimates.json` is a documented private implementation detail
+and owns `fn main()`. Neither expresses an engine × model × corpus matrix, and
+neither verifies that two engines produced the same ids — the property the
+whole comparison rests on.
 
 ## Licence
 
 Apache-2.0. Each engine remains under its own licence; this repository vendors
-none of them.
+none of them. The corpora are excerpts of public datasets under their own
+licences — mostly ODC-By and MIT — listed per corpus in
+`scripts/corpora_card.md`, which is the card published with the dataset.
 
 ## Contributors
 

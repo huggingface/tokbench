@@ -192,6 +192,11 @@ struct EngineResult {
     heap_load_mb: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     heap_encode_mb: Option<f64>,
+    // Set on a `-no-cache` row once its heap has been compared against the
+    // cached twin's. `Some(false)` means the ablation did not take effect and
+    // the row is not an ablation result. See `check_cache_ablation`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cache_ablation_verified: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     memory_threads: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1951,6 +1956,10 @@ fn main() -> Result<()> {
         }
     }
 
+    for run in runs.iter_mut() {
+        check_cache_ablation(&mut run.results);
+    }
+
     if let Some(measurement) = measurement {
         print_measurement_table(&runs, measurement, args.compare_to.as_deref());
     }
@@ -2141,6 +2150,55 @@ struct Footprint {
     also_computes: Option<String>,
     internally_parallel: Option<bool>,
     unsupported: Option<String>,
+}
+
+/// Prove that a `-no-cache` row really did lose its cache, instead of trusting
+/// that the request was honoured.
+///
+/// Asking an engine to drop its cache is a request into a third-party library,
+/// and a library that ignores the request returns a perfectly ordinary-looking
+/// number. That has already happened here once: `pipeline-no-cache` reported
+/// the cached engine for as long as the canonical reader dropped
+/// `cache_capacity` on the floor, and nothing in the output said so.
+///
+/// Live heap after encode is the observable that cannot be faked -- a
+/// populated cache is memory that a cache-free run does not hold (measured on
+/// gpt2/english: 5.77 MB against 3.59 MB). So when both halves of a pair have
+/// been measured, the ablation is only called verified if the cache-free half
+/// actually holds less. When it does not, the row keeps its throughput but is
+/// marked `cache_ablation_verified: false`, because whatever it measured, it
+/// was not the absence of a cache.
+///
+/// `heap_load_mb` is deliberately not used: these caches populate during
+/// encode, so the two halves are identical at load time.
+fn check_cache_ablation(results: &mut [EngineResult]) {
+    const SUFFIX: &str = "-no-cache";
+    let cached: BTreeMap<String, f64> = results
+        .iter()
+        .filter(|r| r.unsupported.is_none() && !r.tokenizer_name.ends_with(SUFFIX))
+        .filter_map(|r| Some((r.tokenizer_name.clone(), r.heap_encode_mb?)))
+        .collect();
+
+    for r in results.iter_mut() {
+        let Some(base) = r.tokenizer_name.strip_suffix(SUFFIX) else {
+            continue;
+        };
+        if r.unsupported.is_some() {
+            continue;
+        }
+        let (Some(free), Some(&with)) = (r.heap_encode_mb, cached.get(base)) else {
+            continue;
+        };
+        let ok = free < with;
+        r.cache_ablation_verified = Some(ok);
+        if !ok {
+            eprintln!(
+                "  ! {}: heap after encode is {free:.2} MB against {base}'s {with:.2} MB — the \
+                 cache was not disabled; this is not an ablation result",
+                r.tokenizer_name
+            );
+        }
+    }
 }
 
 fn measure_memory_repeated(
@@ -2394,5 +2452,63 @@ mod tests {
         assert!(args.command.is_none());
         assert!(args.no_memory);
         assert!(args.no_decode);
+    }
+
+    fn row(name: &str, heap_encode: Option<f64>) -> EngineResult {
+        EngineResult {
+            tokenizer_name: name.into(),
+            heap_encode_mb: heap_encode,
+            ..Default::default()
+        }
+    }
+
+    /// The whole point of the guard: a cache-free row that holds as much heap
+    /// as its cached twin did not disable anything, and must not be published
+    /// as an ablation. This regressed once already, silently.
+    #[test]
+    fn an_ablation_that_did_not_happen_is_not_verified() {
+        let mut r = vec![
+            row("pipeline", Some(7.16)),
+            row("pipeline-no-cache", Some(3.61)),
+        ];
+        check_cache_ablation(&mut r);
+        assert_eq!(r[1].cache_ablation_verified, Some(true));
+
+        // Same heap: the engine ignored the request.
+        let mut r = vec![
+            row("pipeline", Some(7.16)),
+            row("pipeline-no-cache", Some(7.16)),
+        ];
+        check_cache_ablation(&mut r);
+        assert_eq!(r[1].cache_ablation_verified, Some(false));
+
+        // And more heap is certainly not an ablation.
+        let mut r = vec![
+            row("pipeline", Some(7.16)),
+            row("pipeline-no-cache", Some(9.0)),
+        ];
+        check_cache_ablation(&mut r);
+        assert_eq!(r[1].cache_ablation_verified, Some(false));
+    }
+
+    /// No verdict is better than a wrong one: with nothing to compare against,
+    /// the field stays absent rather than defaulting to "verified".
+    #[test]
+    fn an_unmeasured_pair_gets_no_verdict() {
+        let mut r = vec![row("pipeline", None), row("pipeline-no-cache", Some(3.61))];
+        check_cache_ablation(&mut r);
+        assert_eq!(r[1].cache_ablation_verified, None);
+
+        let mut r = vec![row("pipeline-no-cache", Some(3.61))];
+        check_cache_ablation(&mut r);
+        assert_eq!(r[0].cache_ablation_verified, None);
+
+        // The cached row itself is never given a verdict.
+        let mut r = vec![
+            row("pipeline", Some(7.16)),
+            row("pipeline-no-cache", Some(3.61)),
+        ];
+        check_cache_ablation(&mut r);
+        assert_eq!(r[0].cache_ablation_verified, None);
     }
 }
