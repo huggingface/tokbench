@@ -394,6 +394,97 @@ pub fn measure_decode(
     })
 }
 
+/// Distinct whitespace-separated words of `text`, most frequent first.
+pub fn vocabulary(text: &str) -> Vec<String> {
+    let mut counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    for w in text.split_whitespace() {
+        *counts.entry(w).or_insert(0) += 1;
+    }
+    let mut v: Vec<(&str, usize)> = counts.into_iter().collect();
+    v.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
+    v.into_iter().map(|(w, _)| w.to_string()).collect()
+}
+
+/// Synthetic text whose whitespace pretokens recur `rate` times on average,
+/// drawn from `vocab`.
+///
+/// Repetition is the variable that dominates BPE throughput: an engine whose
+/// speed comes from a pretoken cache is fast in proportion to it. Sweeping it
+/// is what separates the cache from the merge loop.
+///
+/// # The vocabulary is sampled uniformly, and that is the whole difficulty
+///
+/// Only the repetition rate may vary across a sweep. A first version took the
+/// `rate`-appropriate number of words off the front of a frequency-ordered
+/// vocabulary, and topped it up with generated tokens when the corpus ran
+/// short. Both are fatal. Frequency order means the high-recurrence points are
+/// built from the shortest, most common words and the low ones drag in every
+/// rare long word, and generated filler tokenizes far worse than real text --
+/// so tokens per byte moved by 2.6x across the sweep and every engine appeared
+/// to speed up with repetition, including engines with no cache at all.
+///
+/// Sampling uniformly at random keeps the word-length and token-density
+/// distribution the same at every point, so the curve isolates repetition.
+/// `tokens` in the report is the audit: it should stay roughly flat across a
+/// sweep, and a sweep where it does not has measured something else.
+///
+/// The corpus's own diversity is a floor on the achievable rate, and no filler
+/// is invented to get under it. Returns the recurrence ACTUALLY achieved --
+/// report that, never the request.
+pub fn synth_recurrence(vocab: &[String], rate: f64, bytes: usize, seed: u64) -> (String, f64) {
+    let mut state = seed | 1;
+    let mut rand = move || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        state
+    };
+
+    let avg = if vocab.is_empty() {
+        7.0
+    } else {
+        vocab.iter().map(|w| w.len() + 1).sum::<usize>() as f64 / vocab.len() as f64
+    };
+    let want_words = ((bytes as f64 / avg).ceil() as usize).max(1);
+    let want_vocab =
+        (((want_words as f64 / rate.max(1.0)).ceil() as usize).max(1)).min(vocab.len());
+
+    // Uniform sample without replacement: a partial Fisher-Yates over indices.
+    let mut idx: Vec<usize> = (0..vocab.len()).collect();
+    for i in 0..want_vocab {
+        let j = i + (rand() % (idx.len() - i) as u64) as usize;
+        idx.swap(i, j);
+    }
+    let pool: Vec<&str> = idx[..want_vocab]
+        .iter()
+        .map(|&i| vocab[i].as_str())
+        .collect();
+
+    let mut out = String::with_capacity(bytes + 32);
+    let mut used = vec![false; pool.len()];
+    let mut distinct = 0usize;
+    let mut words = 0usize;
+    loop {
+        let i = (rand() % pool.len() as u64) as usize;
+        // Stop on a word boundary. Truncating to exactly `bytes` would leave a
+        // fragment that is not a word from the corpus, and pretokenizes as its
+        // own thing.
+        if !out.is_empty() && out.len() + 1 + pool[i].len() > bytes {
+            break;
+        }
+        if !used[i] {
+            used[i] = true;
+            distinct += 1;
+        }
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str(pool[i]);
+        words += 1;
+    }
+    (out, words as f64 / distinct.max(1) as f64)
+}
+
 pub fn read_corpus(path: &Path) -> Option<String> {
     std::fs::read_to_string(path).ok()
 }
@@ -1228,6 +1319,55 @@ mod tests {
             measure_scaling(&make, &chunks, &[1, 2], 1, Padding::Longest).is_none(),
             "an engine that cannot pad must report no padded result"
         );
+    }
+
+    /// Two properties, and the second is the one that broke.
+    ///
+    /// The achieved rate must track the request, and the word-length
+    /// distribution must NOT move across the sweep -- a frequency-ordered
+    /// vocabulary made the high-recurrence points out of short common words,
+    /// so throughput rose with repetition for every engine, cache or no cache.
+    #[test]
+    fn synthetic_recurrence_varies_only_repetition() {
+        let corpus: String = (0..4000)
+            .map(|i| format!("w{i:04}{} ", "x".repeat(i % 9)))
+            .collect();
+        let vocab = vocabulary(&corpus);
+        assert!(vocab.len() >= 4000);
+
+        let mut lengths = Vec::new();
+        for rate in [2.0, 8.0, 64.0] {
+            let (text, got) = synth_recurrence(&vocab, rate, 120_000, 7);
+            assert!(text.len() <= 120_000);
+            assert!(std::str::from_utf8(text.as_bytes()).is_ok());
+            assert!(
+                got >= rate * 0.5 && got <= rate * 2.0,
+                "asked {rate}x, achieved {got}x"
+            );
+            let words: Vec<&str> = text.split_whitespace().collect();
+            lengths.push(words.iter().map(|w| w.len()).sum::<usize>() as f64 / words.len() as f64);
+        }
+        let (lo, hi) = (
+            lengths.iter().cloned().fold(f64::MAX, f64::min),
+            lengths.iter().cloned().fold(0.0, f64::max),
+        );
+        assert!(
+            hi / lo < 1.15,
+            "mean word length moved {lo:.2} -> {hi:.2} across the sweep; \
+             the sweep is varying more than repetition"
+        );
+    }
+
+    /// The corpus's diversity is a floor, and it is reported rather than faked
+    /// with generated filler, which tokenizes nothing like real text.
+    #[test]
+    fn recurrence_floor_is_reported_not_invented() {
+        let vocab = vocabulary("alpha beta gamma delta");
+        let (text, got) = synth_recurrence(&vocab, 1.0, 10_000, 3);
+        assert!(got > 100.0, "4 distinct words cannot give 1x, got {got}x");
+        for w in text.split_whitespace() {
+            assert!(vocab.iter().any(|v| v == w), "invented token {w:?}");
+        }
     }
 
     #[test]

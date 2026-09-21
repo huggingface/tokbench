@@ -32,24 +32,33 @@ produced the same ids.
 ## The corpus is the experiment
 
 Throughput is a property of the tokenizer **and the text**. Fast BPE engines
-cache pretokens, so a number largely reports how often the input repeats. gpt2,
-one thread, synthetic text at a controlled pretoken recurrence, ids verified:
+cache pretokens, so a number largely reports how often the input repeats.
+`tokbench measure recurrence` controls exactly that: it resamples a corpus's
+own vocabulary into synthetic text at a chosen pretoken recurrence rate,
+holding token density constant (`tok/kB` is printed as the audit) so nothing
+but repetition varies. gpt2, one thread, ids verified in every cell:
 
-| MB/s | 1.0× unique | 5.3× | 13.9× | 248× | 3655× | real english |
-|---|---:|---:|---:|---:|---:|---:|
-| gigatoken | **55** | 213 | 794 | 1249 | 1188 | 331 |
-| pipeline | 44 | 144 | 449 | 721 | 1013 | 236 |
-| tokenizers 0.23.1 | 6 | 6 | 8 | 11 | 9 | 7 |
+| MB/s | 2.5× | 4.1× | 8.0× | 16.1× | 64.2× | 264× | gain |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| gigatoken | 161 | 233 | 378 | 557 | 697 | 764 | **4.7×** |
+| pipeline | 128 | 163 | 249 | 416 | 539 | 544 | 4.3× |
+| tokie | 79 | 106 | 145 | 248 | 296 | 292 | 3.7× |
+| pipeline-no-cache | 88 | 89 | 93 | 100 | 116 | 121 | 1.4× |
+| kitoken | 28 | 27 | 28 | 27 | 31 | 32 | 1.1× |
+| tiktoken | 18 | 18 | 17 | 19 | 20 | 19 | 1.1× |
 
-Give gigatoken text that never repeats and it falls **23×**; its lead over
-`pipeline` goes from 1.77× to 1.23×. Its headline is its cache, and production
-traffic is not a corpus you encode twice.
+Engines with a pretoken cache turn repetition into throughput; engines without
+one are flat, which is the control. So a headline number is mostly a statement
+about where its corpus sits on this curve — and **real English sits at 8.3×,
+real Chinese at 1.31×**. That is the whole reason the corpora are mixed: at its
+true operating point gigatoken leads `pipeline` by 1.26× on English and *loses*
+to it on Chinese, 90 against 112. Not a weakness in its merge loop — Chinese
+never supplies the repetition its cache exists to exploit.
 
-So timed slices are disjoint — warming on the chunks the reps re-encode once
-overstated gigatoken by 256×. Ablations are heap-verified, so a cache that was
-never disabled cannot be reported as one. Corpora are mixed: on llama-3 `tokie`
-spans 8.5× between English and Chinese, so an English-only ranking reverses on
-CJK. Cross-engine medians use only cells every compared engine verified.
+Two more consequences. Timed slices are disjoint, because warming on the chunks
+the reps re-encode once overstated gigatoken by 256×. And ablations are
+heap-verified: a `-no-cache` row that does not hold less live heap than its twin
+is not an ablation, whatever it measured.
 
 Corpora are public at
 [huggingface/tokbench-corpora](https://huggingface.co/datasets/huggingface/tokbench-corpora)
