@@ -61,3 +61,8 @@ tokbench-core.workspace = true
 # libpython3.x and is not relocatable. See src/lib.rs.
 #
 # gigatoken_rs = { package = "gigatoken", git = "https://github.com/marcelroed/gigatoken", rev = "34a1599f0c0ae7d7cd0d1c530e6522320158b360" }
+
+# Sizes the pool that gigatoken's own `encode_docs_ragged` fans out over. Safe to
+# declare unconditionally: rayon is on crates.io, so unlike the gigatoken git dep it
+# does not break resolution for the rest of the workspace.
+rayon = "1"

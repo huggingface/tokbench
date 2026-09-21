@@ -35,8 +35,12 @@ tokbench fixes the measurement, not the result:
 4. **Warm cache, stated.** One untimed pass precedes the timed ones, so
    cache-heavy engines are measured in the regime real loops reach.
    `--no-warmup` gives the cold contrast.
-5. **One thread by default.** Engines that parallelise internally are flagged;
-   a whole-machine number is never printed next to a single-core one unlabelled.
+5. **One thread by default, and whose thread is stated.** Engines that
+   parallelise internally are flagged; a whole-machine number is never printed
+   next to a single-core one unlabelled. In the scaling sweep the engine's own
+   parallelism is used wherever it has any, and every curve says whether the
+   threads were the engine's (`native-threads`) or supplied as separate
+   tokenizer instances (`independent-instances`).
 6. **Disclose the extra work.** An engine that also computes byte offsets keeps
    that cost in its number, and the report says so next to it.
 7. **Decode gets the same ids, from the reference.** Decode is timed over the
@@ -48,6 +52,115 @@ tokbench fixes the measurement, not the result:
    `decode(encode(t)) != t` for a tokenizer that is behaving correctly.
 
 The contract is written out in full at the top of [`core/src/lib.rs`](core/src/lib.rs).
+
+## Atomic measurements
+
+Use `measure` when one result is needed without running the rest of the
+benchmark matrix. `--engine`, `--model`, and `--corpus` are repeatable; omitting
+one runs every available value in that dimension. `--engine all` is the explicit
+form of omitting `--engine`. Add `--compare-to` to measure
+one shared comparator and report every target engine's speed as a multiplier
+without adding separate comparator rows.
+
+```bash
+cargo run --release -p tokbench --features rust-engines -- \
+  measure encode --engine all
+cargo run --release -p tokbench --features rust-engines -- \
+  measure decode --engine pipeline --model gpt2 --corpus eng_Latn
+cargo run --release -p tokbench --features rust-engines -- \
+  measure latency --engine pipeline --model gpt2 --corpus eng_Latn
+cargo run --release -p tokbench --features rust-engines -- \
+  measure scaling --engine pipeline --model gpt2 --corpus eng_Latn --max-threads 8
+cargo run --release -p tokbench --features rust-engines -- \
+  measure memory --engine all --corpus eng_Latn --threads 1 \
+  --scaling-mode independent-instances
+cargo run --release -p tokbench --features rust-engines -- \
+  measure memory --engine all --corpus eng_Latn --threads 8 \
+  --scaling-mode independent-instances
+```
+
+Each command writes the normal tokbench JSON schema. It runs only the requested
+measurement family and skips phase breakdown and decode when they were not
+requested. Memory is its own isolated child-process measurement and requires
+exactly one explicit corpus. Interactive runs show one in-place progress bar
+followed by a result table; redirected output omits the progress bar. The
+table keeps one row per model, collapsing multi-corpus runs to medians with a
+completion count. When several target engines are selected,
+each engine becomes a compact column so the model still occupies one row.
+For latency, `--latency-samples` is a maximum: smaller corpora use every
+distinct document they can supply, and the table reports the actual sample
+range.
+Comparison values are medians of matched paired per-corpus ratios. The table
+reports measured and comparable coverage separately. Every raw corpus
+result remains in the JSON. The existing command without `measure` continues
+to run the full benchmark.
+
+The tokenizers v1 pipeline BPE cache can be sized explicitly for an ablation:
+
+```bash
+tokbench measure encode --engine pipeline --cache-capacity 8192
+tokbench measure encode --engine pipeline --cache-capacity 0
+```
+
+Omitting `--cache-capacity` preserves tokenizers v1's upstream default of
+65,536 entries. The explicit value is stored as
+`dataset_metadata.pipeline_cache_capacity`; `0` disables the cache. Other
+engines are unchanged when they run in the same command.
+
+Scaling honors `--reps` and consumes the full corpus. Every repetition warms
+fresh engine instances on a representative input slice, then times each
+document in the disjoint remainder exactly once. Multi-corpus tables report
+both the median observed efficiency and its corpus range. After the timed
+sweep, an untimed encode pass hashes each engine's token IDs against the
+reference, so a scaling-only report carries the same correctness gate as
+`measure encode`.
+
+**Who supplies the threads.** `--scaling-mode auto` drives each engine's native
+threads when it exposes them and otherwise uses independent instances. Select
+one strategy explicitly with `--scaling-mode native-threads` or
+`--scaling-mode independent-instances`. Every curve is labelled:
+
+| label | meaning |
+| --- | --- |
+| `native-threads` | one engine, told to use *n* threads, handed one batch. What a batch caller gets. |
+| `native-threads`, `n/a @ 0T` | the library fans out but exposes no width knob, so one point at the width it chose. Not a curve: there is no 1-thread baseline, and none is invented. |
+| `independent-instances` | *n* single-threaded tokenizer instances in one process, fed by a shared cursor. |
+
+An engine with a fixed-width native pool cannot run in
+`independent-instances` mode because tokbench cannot guarantee that each
+instance is single-threaded. It reports no curve rather than oversubscribing
+the machine under the wrong label.
+
+**Padding is an axis, not a footnote.** `--padding off|longest|both` (both by
+default) measures each engine ragged and padded to the batch's longest member.
+Padding is a large and uneven cost -- a fill, often a second pass, sometimes a
+different output layout -- and it is a hard requirement for anyone feeding
+rectangular tensors, so the unpadded number alone is not usable for serving.
+The harness never pads on an engine's behalf: an engine with no native padding
+reports `no native padding` for that cell rather than an unpadded number
+wearing a padded label.
+
+## Hugging Face Jobs
+
+[`jobs/`](jobs/) contains a reproducible cloud runner. It builds tokbench into
+an immutable container, requires a pinned input-data revision, runs several
+complete process-level repetitions, records the CPU and software environment,
+and writes raw reports plus checksums to a mounted Storage Bucket. See
+[`jobs/README.md`](jobs/README.md) for the image and submission commands.
+
+After the Job completes, fetch all of its reports and open their median in the
+native dashboard. Add `RUN=3` to inspect one underlying run:
+
+```bash
+make dash BUCKET=huggingface/tokbench-results JOB_ID=<job-id>
+```
+
+The blog's original eight-model encode matrix is available as
+`python jobs/submit.py --profile blog-v1 ...`.
+
+The Jobs runner is intended for reproducible invocation and for measuring
+variance. A hardware flavor does not guarantee that separate Jobs use the same
+physical CPU, so absolute results remain machine-specific.
 
 ## Decode
 
@@ -76,7 +189,7 @@ cell is marked `differ` and excluded from every ranking.
 | engine | language | class | status |
 |---|---|---|---|
 | [hf-tokenizers](engines/hf-tokenizers) | Rust | native | **wired** — reference + oracle, 4-phase instrumented |
-| [pipeline](engines/pipeline) | Rust | native | **wired** — the rc0 pipeline, [tk-encode 1.0.0-rc.0](https://github.com/huggingface/tokenizers/tree/feat/train_encode_split) |
+| [pipeline](engines/pipeline) | Rust | native | **wired** — the rc0 pipeline, [tk-encode 1.0.0-rc.0](https://github.com/huggingface/tokenizers/tree/5c3727a93bd64cd9caf0e229c637fc71f2cd2fce) |
 | [kitoken](engines/kitoken) | Rust | native | **wired** — BPE + Unigram + WordPiece from one crate |
 | [tokie](engines/tokie) | Rust | native | **wired, verified** |
 | [tiktoken](engines/tiktoken) | Rust | native | **wired, verified** (needs derived `ranks.tiktoken`) |
@@ -106,9 +219,12 @@ Two different questions, both reported, neither a substitute for the other:
   PyPI wheel, npm unpacked). From `scripts/package_size.py`.
 - **`binary_delta_kb`** — stripped bytes added to a minimal program over a
   no-engine baseline. From `scripts/binsize.sh`.
-- **`rss_delta_mb`** — resident memory once loaded and warmed, measured in a
-  **dedicated child process per engine**. In one process the allocator hands
-  engine B the pages engine A freed, reporting B's footprint as ~0.
+- **`heap_load_mb`** — live heap held after loading the tokenizer.
+- **`heap_encode_mb`** — live heap after encoding the selected corpus, including
+  populated caches and worker state. Both heap values are measured in a
+  **dedicated child process per engine**. `memory_threads` and
+  `memory_parallelism` record whether the result used one native pool or
+  multiple independent tokenizer instances.
 
 ## Output
 

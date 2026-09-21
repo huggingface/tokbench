@@ -220,6 +220,70 @@ pub trait Engine: Send {
     /// and is timed on purpose.
     fn encode(&mut self, text: &str, out: &mut Ids);
 
+    /// Ask the engine to use `threads` threads for its OWN parallelism, and
+    /// say whether it can.
+    ///
+    /// `false` -- the default -- means the library exposes no such control, so
+    /// the only way to get a scaling curve out of it is to run several
+    /// instances side by side. `true` means the engine owns its threading and
+    /// [`measure_scaling`] must hand it a batch and stay out of the way.
+    ///
+    /// This is the whole reason the harness can no longer assume one shape of
+    /// parallelism: re-implementing it outside an engine that already has a
+    /// pool measures the harness, not the engine.
+    fn set_threads(&mut self, _threads: usize) -> bool {
+        false
+    }
+
+    /// Encode a whole batch through the library's own batch entry point,
+    /// appending every document's ids to `out`.
+    ///
+    /// This is what an engine with a native thread pool has to be called through --
+    /// its `encode` is one document on one thread by construction, so timing
+    /// that in a loop can never show what its pool does.
+    ///
+    /// The default loops [`Engine::encode`], which is exactly right for a
+    /// single-threaded library: same work, same order, no batch API invented on
+    /// its behalf. Ids are concatenated rather than kept per document because
+    /// every caller here either hashes the whole stream or discards it.
+    fn encode_batch(&mut self, texts: &[&str], out: &mut Ids) {
+        for text in texts {
+            self.encode(text, out);
+        }
+    }
+
+    /// Does this engine have a batch entry point of its own?
+    ///
+    /// Separate from [`Engine::set_threads`] because the two are independent,
+    /// and the combination decides how the engine may be measured:
+    ///
+    /// * batch + settable threads -- a full curve through its own pool.
+    /// * batch + unsettable threads -- some libraries hardcode their width
+    ///   (`available_parallelism()` and no knob). One point, at the width the
+    ///   engine chose, reported as such. Not a curve, because there is no
+    ///   baseline, and emphatically not harness threading.
+    /// * no batch -- the harness may thread it, and says so.
+    ///
+    /// Returning false here while overriding `encode_batch` is the one
+    /// combination that silently loses: the harness would thread an engine
+    /// that had its own way of doing it.
+    fn has_native_batch(&self) -> bool {
+        false
+    }
+
+    /// Configure padding for subsequent [`Engine::encode_batch`] calls, and
+    /// say whether the library can do it.
+    ///
+    /// The default accepts [`Padding::Off`] -- every tokenizer can produce
+    /// ragged output -- and refuses [`Padding::Longest`], so a padded cell is
+    /// reported unsupported instead of being quietly measured unpadded. The
+    /// harness must never pad on an engine's behalf: doing so would charge
+    /// every engine the same fill cost and hide the thing being compared,
+    /// which is whether the library pads well.
+    fn set_padding(&mut self, padding: Padding) -> bool {
+        matches!(padding, Padding::Off)
+    }
+
     /// Per-stage timing for one `encode` of `text`, when the library exposes
     /// its stages separately.
     ///
@@ -258,6 +322,68 @@ pub trait Build {
     fn build(model: &Model) -> Result<Box<dyn Engine>, Unsupported>
     where
         Self: Sized;
+
+    /// Build with an explicit cache capacity when the engine exposes one.
+    ///
+    /// `None` preserves the library's own default. Engines without a
+    /// configurable cache reject `Some` rather than silently ignoring a
+    /// benchmark parameter.
+    fn build_with_cache_capacity(
+        model: &Model,
+        cache_capacity: Option<usize>,
+    ) -> Result<Box<dyn Engine>, Unsupported>
+    where
+        Self: Sized,
+    {
+        match cache_capacity {
+            None => Self::build(model),
+            Some(_) => Err(Unsupported(
+                "this library exposes no configurable cache capacity".into(),
+            )),
+        }
+    }
+
+    /// The same engine with the library's own caches turned off, when the
+    /// library can be asked for that.
+    ///
+    /// A build-time question, not a setter: a pretoken cache is sized and
+    /// populated when the model is constructed, so there is nothing to toggle
+    /// afterwards. The registry pairs this with [`Build::build`] as a separate
+    /// `<engine>-no-cache` row, which is what makes a cache's contribution
+    /// readable instead of inferred.
+    ///
+    /// The default refuses, and the refusal is the point. Most of these
+    /// libraries expose no way to disable their caches, and a cache-free cell
+    /// filled with a cached number is worse than an absent one: subtracting
+    /// the two rows would report the cache as worth 0%. Engines that can do it
+    /// say how; engines that cannot say why not.
+    fn build_without_cache(_model: &Model) -> Result<Box<dyn Engine>, Unsupported>
+    where
+        Self: Sized,
+    {
+        Err(Unsupported(
+            "this library exposes no way to disable its caches".into(),
+        ))
+    }
+
+    /// Registry-compatible wrapper for a cache-disabled engine.
+    ///
+    /// An explicit capacity and a cache-free alias are contradictory, so the
+    /// default rejects that combination instead of choosing one silently.
+    fn build_without_cache_with_capacity(
+        model: &Model,
+        cache_capacity: Option<usize>,
+    ) -> Result<Box<dyn Engine>, Unsupported>
+    where
+        Self: Sized,
+    {
+        match cache_capacity {
+            None => Self::build_without_cache(model),
+            Some(_) => Err(Unsupported(
+                "an explicit cache capacity cannot be applied to a no-cache engine".into(),
+            )),
+        }
+    }
 }
 
 /// A deterministic hash of an id stream, used to check that two engines did
@@ -329,6 +455,15 @@ pub struct DecodeMeasure {
     pub text_hash: u64,
 }
 
+/// Call-by-call encode latency over distinct, fixed-size documents.
+#[derive(Clone, Debug)]
+pub struct LatencyMeasure {
+    pub p50_us: f64,
+    pub p99_us: f64,
+    pub samples: usize,
+    pub document_bytes: usize,
+}
+
 /// Split a corpus into fixed-size chunks on char boundaries.
 ///
 /// ~10 kB is the regime where per-call overhead is amortised but a document
@@ -357,6 +492,45 @@ fn median(mut v: Vec<f64>) -> f64 {
     } else {
         (v[n / 2 - 1] + v[n / 2]) / 2.0
     }
+}
+
+/// Measure one encode call at a time over documents that are each used once.
+///
+/// `documents[0]` warms the engine. Every remaining document contributes one
+/// latency sample, which prevents a document-level cache from turning this
+/// into a lookup benchmark. `document_bytes` is the requested maximum; a
+/// document can be a few bytes shorter when a UTF-8 boundary requires it.
+pub fn measure_latency(
+    engine: &mut dyn Engine,
+    documents: &[String],
+    document_bytes: usize,
+) -> Option<LatencyMeasure> {
+    if documents.len() < 2 || document_bytes == 0 {
+        return None;
+    }
+    let mut out = Ids::with_capacity(document_bytes);
+    engine.encode(&documents[0], &mut out);
+
+    let mut samples = Vec::with_capacity(documents.len() - 1);
+    for document in &documents[1..] {
+        out.clear();
+        let started = Instant::now();
+        engine.encode(document, &mut out);
+        let elapsed_us = started.elapsed().as_secs_f64() * 1e6;
+        std::hint::black_box(&out);
+        samples.push(elapsed_us);
+    }
+    samples.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let percentile = |pct: usize| {
+        let rank = (pct * samples.len()).div_ceil(100).max(1);
+        samples[rank - 1]
+    };
+    Some(LatencyMeasure {
+        p50_us: percentile(50),
+        p99_us: percentile(99),
+        samples: samples.len(),
+        document_bytes,
+    })
 }
 
 /// THE timing loop. Every engine, every language, goes through this function
@@ -633,149 +807,388 @@ fn perf_cores() -> usize {
         .unwrap_or(1)
 }
 
-/// Measure throughput at each thread count and derive scaling efficiency.
+/// Whether a batch is padded to the length of its longest member.
 ///
-/// # How the work is parallelised, and why this way
+/// A first-class axis rather than a detail, because it is a large and uneven
+/// cost: padding is a fill, often a second pass over the batch, and sometimes
+/// a different output layout entirely. An engine that skips it looks fast for
+/// a reason that has nothing to do with tokenizing, and a serving deployment
+/// that needs rectangular tensors cannot use the unpadded number.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Padding {
+    /// Ragged output: every document keeps its own length.
+    Off,
+    /// Every document padded to the longest in the batch.
+    Longest,
+}
+
+impl Padding {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Padding::Off => "off",
+            Padding::Longest => "longest",
+        }
+    }
+}
+
+/// How a scaling curve was produced.
 ///
-/// Each thread gets **its own engine instance** (built by `make`, outside the
-/// timer) and pulls documents off a shared atomic cursor. Two deliberate
-/// choices:
+/// Not cosmetic, and not a detail a reader may skip: the two variants answer
+/// different questions and must never share a column.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScalingKind {
+    /// One engine, told to use `n` threads, handed one batch. What a caller
+    /// actually gets from the library's own batch API.
+    NativeThreads,
+    /// `n` independent single-thread engines fed by a shared cursor. What a
+    /// caller gets by sharding requests, and the only curve obtainable from a
+    /// library with no threading of its own.
+    IndependentInstances,
+}
+
+impl ScalingKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ScalingKind::NativeThreads => "native-threads",
+            ScalingKind::IndependentInstances => "independent-instances",
+        }
+    }
+}
+
+/// Which scaling strategy the caller requests.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ScalingMode {
+    /// Use native threads when the engine exposes them, otherwise independent
+    /// instances. This preserves tokbench's historical automatic selection.
+    #[default]
+    Auto,
+    /// One tokenizer instance using the library's own configurable pool.
+    NativeThreads,
+    /// One single-threaded tokenizer instance per harness thread.
+    IndependentInstances,
+}
+
+/// A scaling curve and, inseparably, the conditions it was obtained under.
+#[derive(Clone, Debug)]
+pub struct Scaling {
+    pub kind: ScalingKind,
+    /// Which padding mode was in force. Two curves for the same engine are
+    /// only comparable at equal padding.
+    pub padding: Padding,
+    /// One point per thread count the engine agreed to run at. Thread counts
+    /// it refused are absent rather than approximated -- see
+    /// [`Engine::set_threads`].
+    pub points: Vec<ThreadPoint>,
+}
+
+impl Scaling {
+    fn empty(kind: ScalingKind, padding: Padding) -> Self {
+        Scaling {
+            kind,
+            padding,
+            points: Vec::new(),
+        }
+    }
+}
+
+/// Does throughput grow with thread count, and how far short of linear?
 ///
-/// * **Per-thread engines, not one shared engine.** Most of these libraries
-///   are not `Sync`, and those that are often hide a mutex around a shared
-///   cache. Giving every thread its own instance measures the best case the
-///   library can offer, so a poor scaling number is a real property of the
-///   engine rather than an artefact of how the harness shared it.
+/// **The engine's own parallelism is used wherever the engine has any.** An
+/// engine that answers [`Engine::set_threads`] gets one instance, is told how
+/// many threads to use, and is handed the whole measured batch through
+/// [`Engine::encode_batch`]. The harness then holds nothing but the clock.
+///
+/// Threading such an engine from outside is not a conservative approximation,
+/// it is a different and wrong number: it leaves the engine's pool idle, or --
+/// worse, because it looks plausible -- starts `n` pools of `n` threads each
+/// and reports the resulting oversubscription as the engine's scaling. An
+/// engine that parallelises internally would also post >100% efficiency with
+/// independent instances, having already used more than one core at "1 thread".
+///
+/// Only when `set_threads` returns false does the harness thread the engine
+/// itself, and the curve is then tagged [`ScalingKind::IndependentInstances`] so a reader
+/// can see it is the other question. Two choices in that fallback:
+///
+/// * **Per-thread engines, not one shared engine.** Most such libraries are
+///   not `Sync`, and those that are often hide a mutex around a shared cache.
+///   Giving every thread its own instance measures the best case the library
+///   can offer, so a poor scaling number is a real property of the engine
+///   rather than an artefact of how the harness shared it.
 /// * **Work stealing, not a static split.** Documents differ in cost by more
 ///   than 10x across scripts. A contiguous split would leave threads idle at
 ///   the end and report that as poor scaling; a shared cursor keeps every
-///   thread busy until the corpus is done, so what is measured is the engine,
-///   not the partitioning.
+///   thread busy until the corpus is done.
 ///
-/// Warm-up runs per thread over the whole corpus, matching what
-/// [`measure`] does for the single-thread case, so the 1-thread point of this
-/// curve is directly comparable with the headline number.
-///
-/// Engines that parallelise *internally* will show >100% efficiency here,
-/// because they were already using more than one core at "1 thread". That is
-/// why [`Info::internally_parallel`] exists and why the report flags it.
-///
-/// `target_secs` is how long one timed pass should last; the corpus is walked
-/// as many times as needed to reach it (see below). Pass `0.0` to walk it
-/// exactly once, which is only appropriate for tests.
+/// Every repetition builds fresh engine instances. Each instance warms on a
+/// representative slice of the corpus, while the timed region contains only
+/// the disjoint remainder and encodes every measured document once. This is
+/// the same warm-engine, unseen-text workload as [`measure`], and prevents an
+/// engine's exact-input cache from turning corpus replay into apparent
+/// throughput or scaling.
 pub fn measure_scaling(
     make: &(dyn Fn() -> Option<Box<dyn Engine>> + Sync),
     chunks: &[String],
     counts: &[usize],
     reps: usize,
-    target_secs: f64,
-) -> Vec<ThreadPoint> {
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    padding: Padding,
+) -> Option<Scaling> {
+    measure_scaling_with_mode(make, chunks, counts, reps, padding, ScalingMode::Auto)
+}
 
-    let bytes: usize = chunks.iter().map(|c| c.len()).sum();
-    let mut out: Vec<ThreadPoint> = Vec::new();
-    let mut base = f64::NAN;
+pub fn measure_scaling_with_mode(
+    make: &(dyn Fn() -> Option<Box<dyn Engine>> + Sync),
+    chunks: &[String],
+    counts: &[usize],
+    reps: usize,
+    padding: Padding,
+    mode: ScalingMode,
+) -> Option<Scaling> {
+    if chunks.len() < 2 || reps == 0 {
+        return Some(Scaling::empty(ScalingKind::IndependentInstances, padding));
+    }
 
-    // How many times to walk the corpus inside ONE timed pass.
-    //
-    // Without this the sweep measures thread spawning, not tokenizing. A 200 kB
-    // corpus is ~20 documents; at 14 threads that is 1.4 documents each, and a
-    // fast engine finishes the whole corpus in a few hundred microseconds —
-    // less than it costs to start the threads. The result is an efficiency
-    // figure that collapses toward zero for precisely the fastest engines,
-    // which looks like a damning scaling result and is pure artefact.
-    //
-    // So: time one warm single-thread pass, then repeat the corpus enough times
-    // that the timed region is ~100 ms. Thread start-up becomes noise, and every
-    // thread has real work queued. The corpus is walked in order and each
-    // document is encoded the same number of times by construction, so the
-    // measured throughput still refers to distinct documents rather than one
-    // document replayed out of cache.
-    let repeat = if target_secs <= 0.0 {
-        1
-    } else {
-        let mut probe = match make() {
-            Some(e) => e,
-            None => return out,
-        };
-        let mut buf: Ids = Vec::new();
-        for c in chunks {
-            buf.clear();
-            probe.encode(c, &mut buf); // warm
-        }
-        let t = Instant::now();
-        for c in chunks {
-            buf.clear();
-            probe.encode(c, &mut buf);
-        }
-        let one = t.elapsed().as_secs_f64();
-        if one > 0.0 {
-            ((target_secs / one).ceil() as usize).clamp(1, 10_000)
+    // Spread warm-up throughout the input rather than taking a contiguous
+    // prefix, which could be a single language or source in a mixed corpus.
+    // The two sets remain strictly disjoint.
+    let mut warm_chunks: Vec<&str> = Vec::new();
+    let mut measured_chunks: Vec<&str> = Vec::new();
+    for (index, chunk) in chunks.iter().enumerate() {
+        if index % 6 == 0 {
+            warm_chunks.push(chunk.as_str());
         } else {
-            1
+            measured_chunks.push(chunk.as_str());
         }
+    }
+    let measured_bytes: usize = measured_chunks.iter().map(|c| c.len()).sum();
+
+    // Ask the engine what it can do, once, on a probe instance that encodes
+    // nothing. `set_threads` is the only honest capability signal --
+    // `Info::internally_parallel` is a self-declaration, not a capability --
+    // and `set_padding` decides whether this cell exists for this engine at
+    // all.
+    let mut probe = make()?;
+    if !probe.set_padding(padding) {
+        // No native padding. Reported as unsupported rather than measured
+        // unpadded and labelled padded, and never padded by the harness.
+        return None;
+    }
+    let native_batch = probe.has_native_batch();
+    drop(probe);
+
+    // Which thread counts will this engine actually honour? Asked up front, on
+    // a fresh instance each time, so the timing loop never has to interpret a
+    // refusal -- and so an engine whose parallelism is on/off rather than an
+    // integer contributes the points it can instead of nothing.
+    //
+    // Probing every requested count, not just 1: an engine that can only run
+    // at full width would look thread-less if 1 were the only question asked,
+    // and would then be threaded from outside -- the bug this all exists to
+    // prevent.
+    let settable: Vec<usize> = counts
+        .iter()
+        .copied()
+        .filter(|&n| match make() {
+            Some(mut engine) => engine.set_threads(n),
+            None => false,
+        })
+        .collect();
+
+    let can_pin_one = settable.contains(&1);
+    let (kind, usable, pin_instances) = match mode {
+        ScalingMode::Auto if !settable.is_empty() => (ScalingKind::NativeThreads, settable, false),
+        ScalingMode::Auto if native_batch => {
+            // Has its own batch fan-out but no width control. One point, at
+            // whatever width it picked; `threads: 0` records "the engine's own
+            // choice" rather than asserting a number the harness did not set.
+            (ScalingKind::NativeThreads, vec![0], false)
+        }
+        ScalingMode::Auto => (ScalingKind::IndependentInstances, counts.to_vec(), false),
+        ScalingMode::NativeThreads if !settable.is_empty() => {
+            (ScalingKind::NativeThreads, settable, false)
+        }
+        ScalingMode::NativeThreads if native_batch => (ScalingKind::NativeThreads, vec![0], false),
+        ScalingMode::NativeThreads => {
+            return Some(Scaling::empty(ScalingKind::NativeThreads, padding));
+        }
+        ScalingMode::IndependentInstances if native_batch && !can_pin_one => {
+            // A fixed-width native pool cannot be made single-threaded. Running
+            // several instances would oversubscribe the machine while claiming
+            // one thread per instance.
+            return Some(Scaling::empty(ScalingKind::IndependentInstances, padding));
+        }
+        ScalingMode::IndependentInstances => (
+            ScalingKind::IndependentInstances,
+            counts.to_vec(),
+            can_pin_one,
+        ),
     };
-    let total_units = chunks.len() * repeat;
-    let total_bytes = bytes * repeat;
 
-    for &n in counts {
-        // Build and warm every engine before the clock starts.
-        let mut engines: Vec<Box<dyn Engine>> = Vec::with_capacity(n);
-        for _ in 0..n {
-            match make() {
-                Some(e) => engines.push(e),
-                None => return out,
-            }
-        }
-        for e in engines.iter_mut() {
-            let mut buf: Ids = Vec::new();
-            for c in chunks {
-                buf.clear();
-                e.encode(c, &mut buf);
-            }
-        }
+    // Padding is a property of a batch, so it only means anything where the
+    // engine drives its own batch. An externally threaded engine is called one
+    // document at a time, and there is no batch to pad to.
+    if kind == ScalingKind::IndependentInstances && padding != Padding::Off {
+        return None;
+    }
+    if usable.is_empty() {
+        return Some(Scaling::empty(kind, padding));
+    }
 
+    let mut measured: Vec<(usize, f64)> = Vec::new();
+    for &n in &usable {
         let mut samples = Vec::with_capacity(reps);
         for _ in 0..reps {
-            let cursor = AtomicUsize::new(0);
-            let t0 = Instant::now();
-            std::thread::scope(|s| {
-                for e in engines.iter_mut() {
-                    let cursor = &cursor;
-                    s.spawn(move || {
-                        let mut buf: Ids = Vec::with_capacity(4096);
-                        loop {
-                            let i = cursor.fetch_add(1, Ordering::Relaxed);
-                            if i >= total_units {
-                                break;
-                            }
-                            buf.clear();
-                            e.encode(&chunks[i % chunks.len()], &mut buf);
-                            std::hint::black_box(&buf);
-                        }
-                    });
+            let timed = match kind {
+                ScalingKind::NativeThreads => {
+                    time_native_threads(make, &warm_chunks, &measured_chunks, n, padding)
                 }
-            });
-            samples.push(t0.elapsed().as_secs_f64());
+                ScalingKind::IndependentInstances => time_independent_instances(
+                    make,
+                    &warm_chunks,
+                    &measured_chunks,
+                    n,
+                    pin_instances,
+                ),
+            };
+            match timed {
+                Some(secs) => samples.push(secs),
+                // `usable` already established the engine takes `n`, so a
+                // refusal now is a bug in the adapter, not a capability.
+                None => return Some(Scaling::empty(kind, padding)),
+            }
         }
 
         let secs = median(samples);
-        let mbps = (total_bytes as f64 / (1024.0 * 1024.0)) / secs;
-        if n == counts[0] {
-            base = mbps;
-        }
-        let ideal = base * n as f64 / counts[0] as f64;
-        out.push(ThreadPoint {
-            threads: n,
-            mbps,
-            efficiency_pct: if ideal > 0.0 {
-                mbps / ideal * 100.0
-            } else {
-                0.0
-            },
-        });
+        let mbps = (measured_bytes as f64 / (1024.0 * 1024.0)) / secs;
+        measured.push((n, mbps));
     }
-    out
+
+    // Measurement order may be reversed between complete runs to expose
+    // thermal or temporal drift. Always pair against the measured 1-thread
+    // point, then return a canonical thread-count order for JSON consumers.
+    //
+    // An engine that cannot be pinned to one thread has no baseline, so
+    // efficiency is left at 0.0 rather than invented from its widest point --
+    // which would report 100% for an engine whose scaling is unknown.
+    let base = measured
+        .iter()
+        .find_map(|(threads, mbps)| (*threads == 1).then_some(*mbps));
+    measured.sort_unstable_by_key(|(threads, _)| *threads);
+    let points = measured
+        .into_iter()
+        .map(|(threads, mbps)| {
+            let ideal = base.map(|b| b * threads as f64).unwrap_or(0.0);
+            ThreadPoint {
+                threads,
+                mbps,
+                efficiency_pct: if ideal > 0.0 {
+                    mbps / ideal * 100.0
+                } else {
+                    0.0
+                },
+            }
+        })
+        .collect();
+    Some(Scaling {
+        kind,
+        padding,
+        points,
+    })
+}
+
+/// One timed batch through the engine's own pool.
+///
+/// `None` when the engine will not take `threads`. That is a hard stop rather
+/// than a silent fallback: a refusal here would otherwise run on whatever
+/// thread count the engine felt like and report it as `threads`.
+fn time_native_threads(
+    make: &(dyn Fn() -> Option<Box<dyn Engine>> + Sync),
+    warm: &[&str],
+    measured: &[&str],
+    threads: usize,
+    padding: Padding,
+) -> Option<f64> {
+    let mut engine = make()?;
+    // `0` means "the width the engine chose"; there is nothing to set.
+    if threads != 0 && !engine.set_threads(threads) {
+        return None;
+    }
+    if !engine.set_padding(padding) {
+        return None;
+    }
+
+    // Warm through the same batch entry point, so a pool that grows to the
+    // concurrency it has seen is already at full width. Unwarmed, the first
+    // timed batch would pay to populate it.
+    let mut buf: Ids = Vec::new();
+    engine.encode_batch(warm, &mut buf);
+    buf.clear();
+
+    let t0 = Instant::now();
+    engine.encode_batch(measured, &mut buf);
+    let elapsed = t0.elapsed().as_secs_f64();
+    std::hint::black_box(&buf);
+    Some(elapsed)
+}
+
+/// One timed run of `threads` independent engines over a shared cursor, for
+/// libraries that have no threading of their own.
+fn time_independent_instances(
+    make: &(dyn Fn() -> Option<Box<dyn Engine>> + Sync),
+    warm: &[&str],
+    measured: &[&str],
+    threads: usize,
+    pin_single_thread: bool,
+) -> Option<f64> {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Barrier;
+
+    // A fresh instance per worker and repetition makes every timed document
+    // unseen by that instance. Construction stays outside the timer, as the
+    // driver reports it separately.
+    let mut engines: Vec<Box<dyn Engine>> = Vec::with_capacity(threads);
+    for _ in 0..threads {
+        let mut engine = make()?;
+        if pin_single_thread && !engine.set_threads(1) {
+            return None;
+        }
+        engines.push(engine);
+    }
+    for engine in engines.iter_mut() {
+        let mut buf: Ids = Vec::new();
+        for &chunk in warm {
+            buf.clear();
+            engine.encode(chunk, &mut buf);
+        }
+    }
+
+    let cursor = AtomicUsize::new(0);
+    let start = Barrier::new(threads + 1);
+    let done = Barrier::new(threads + 1);
+    Some(std::thread::scope(|scope| {
+        for engine in engines.iter_mut() {
+            let cursor = &cursor;
+            let start = &start;
+            let done = &done;
+            scope.spawn(move || {
+                let mut buf: Ids = Vec::with_capacity(4096);
+                start.wait();
+                loop {
+                    let index = cursor.fetch_add(1, Ordering::Relaxed);
+                    if index >= measured.len() {
+                        break;
+                    }
+                    buf.clear();
+                    engine.encode(measured[index], &mut buf);
+                    std::hint::black_box(&buf);
+                }
+                done.wait();
+            });
+        }
+        let t0 = Instant::now();
+        start.wait();
+        done.wait();
+        t0.elapsed().as_secs_f64()
+    }))
 }
 
 #[cfg(test)]
@@ -878,6 +1291,19 @@ mod tests {
         // The hash has to discriminate, or verification is a no-op that
         // passes everything.
         assert_ne!(text_hash("abc"), text_hash("acb"));
+    }
+
+    #[test]
+    fn latency_harness_measures_each_distinct_document_once() {
+        let documents: Vec<String> = (0..101)
+            .map(|index| format!("document {index:03} with distinct text"))
+            .collect();
+        let measured = measure_latency(&mut Bytes, &documents, 512)
+            .expect("one warm-up document and 100 samples");
+        assert_eq!(measured.samples, 100);
+        assert_eq!(measured.document_bytes, 512);
+        assert!(measured.p50_us > 0.0);
+        assert!(measured.p99_us >= measured.p50_us);
     }
 
     /// No document may be encoded twice inside the timed region.
@@ -986,25 +1412,37 @@ mod tests {
         };
 
         SEEN.store(0, Ordering::Relaxed);
-        // target_secs = 0 → walk the corpus exactly once per pass, so the
-        // expected byte count below is exact.
-        let pts = measure_scaling(&make, &chunks, &counts, reps, 0.0);
+        let scaling = measure_scaling(&make, &chunks, &counts, reps, Padding::Off).unwrap();
+        assert_eq!(
+            scaling.kind,
+            ScalingKind::IndependentInstances,
+            "an engine that refuses set_threads has to be threaded by the harness"
+        );
+        let pts = scaling.points;
         assert_eq!(pts.len(), counts.len());
 
-        // Warm-up encodes the whole corpus once per engine, and each timed rep
-        // encodes it once in total across all threads. For counts [1,2,4]:
-        // warm-up = (1+2+4) corpora, timed = 3 corpora (one per count).
-        let engines: usize = counts.iter().sum();
-        let expected = total * engines + total * counts.len() * reps;
+        let warm_bytes: usize = chunks
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| index % 6 == 0)
+            .map(|(_, chunk)| chunk.len())
+            .sum();
+        let measured_bytes = total - warm_bytes;
+        let engines_per_rep: usize = counts.iter().sum();
+        let expected = (warm_bytes * engines_per_rep + measured_bytes * counts.len()) * reps;
         assert_eq!(
             SEEN.load(Ordering::Relaxed),
             expected,
             "every document must be encoded exactly once per timed pass"
         );
+        // Plus the probes: one instance to ask about padding and native
+        // batch, then one per requested thread count to ask whether the engine
+        // will take it. They encode nothing, so they do not appear in `SEEN`,
+        // and they are built outside every timed region.
         assert_eq!(
             made.load(Ordering::Relaxed),
-            engines,
-            "one engine per thread"
+            engines_per_rep * reps + 1 + counts.len(),
+            "one engine per thread and repetition, plus the capability probes"
         );
 
         // The single-thread point is the baseline, so it is 100% by definition.
@@ -1012,6 +1450,249 @@ mod tests {
         for p in &pts {
             assert!(p.mbps > 0.0 && p.mbps.is_finite());
         }
+    }
+
+    #[test]
+    fn scaling_can_be_measured_in_reverse_but_is_reported_in_order() {
+        let chunks = vec![
+            "synthetic unit-test warm-up chunk".repeat(100),
+            "synthetic unit-test measured chunk".repeat(100),
+        ];
+        let make = || Some(Box::new(Bytes) as Box<dyn Engine>);
+        let pts = measure_scaling(&make, &chunks, &[4, 2, 1], 1, Padding::Off)
+            .unwrap()
+            .points;
+
+        assert_eq!(
+            pts.iter().map(|point| point.threads).collect::<Vec<_>>(),
+            vec![1, 2, 4]
+        );
+        assert!((pts[0].efficiency_pct - 100.0).abs() < 1e-6);
+    }
+
+    /// An engine that owns its threading must be driven through its own batch
+    /// entry point -- one instance, `set_threads`, one `encode_batch` -- and
+    /// never cloned per thread. This is the regression the independent-instance-only
+    /// harness shipped: it reported the harness's scaling as the engine's.
+    #[test]
+    fn scaling_uses_the_engines_own_parallelism_when_it_has_any() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        static MADE: AtomicUsize = AtomicUsize::new(0);
+        static BATCHES: AtomicUsize = AtomicUsize::new(0);
+
+        /// Reports a thread count it was actually given, and counts how often
+        /// it was constructed and called as a batch.
+        struct Pooled {
+            threads: Arc<AtomicUsize>,
+        }
+        impl Engine for Pooled {
+            fn info(&self) -> Info {
+                Info {
+                    name: "pooled",
+                    version: "0",
+                    lang: "rust",
+                    class: Class::Native,
+                    url: "",
+                    also_computes: "",
+                    internally_parallel: true,
+                }
+            }
+            fn encode(&mut self, text: &str, out: &mut Ids) {
+                out.extend(text.as_bytes().iter().map(|&b| b as u32));
+            }
+            fn set_threads(&mut self, threads: usize) -> bool {
+                self.threads.store(threads, Ordering::Relaxed);
+                true
+            }
+            fn encode_batch(&mut self, texts: &[&str], out: &mut Ids) {
+                BATCHES.fetch_add(1, Ordering::Relaxed);
+                for text in texts {
+                    self.encode(text, out);
+                }
+            }
+        }
+
+        let chunks = vec![
+            "warm chunk for the pooled engine".repeat(100),
+            "measured chunk for the pooled engine".repeat(100),
+            "another measured chunk for the pooled engine".repeat(100),
+        ];
+        let seen_threads = Arc::new(AtomicUsize::new(0));
+        let t = seen_threads.clone();
+        MADE.store(0, Ordering::Relaxed);
+        BATCHES.store(0, Ordering::Relaxed);
+        let make = move || -> Option<Box<dyn Engine>> {
+            MADE.fetch_add(1, Ordering::Relaxed);
+            Some(Box::new(Pooled { threads: t.clone() }))
+        };
+
+        // 1, 2, 8 rather than 1, 2, 4: native-thread mode builds
+        // `1 + 2 * counts.len()` engines, and with 1, 2, 4 that happens to
+        // equal `1 + 2 + 4`, so the assertion below could not tell correct
+        // behaviour from one-engine-per-thread.
+        let counts = [1usize, 2, 8];
+        let scaling = measure_scaling(&make, &chunks, &counts, 1, Padding::Off).unwrap();
+
+        assert_eq!(
+            scaling.kind,
+            ScalingKind::NativeThreads,
+            "an engine answering set_threads must be measured through its own pool"
+        );
+        assert_eq!(scaling.points.len(), counts.len());
+        assert_eq!(
+            seen_threads.load(Ordering::Relaxed),
+            8,
+            "the last thread count must have reached the engine"
+        );
+        // One capability probe, one prefilter probe per thread count, and one
+        // engine per timed point -- NOT one engine per thread. The number to
+        // fear is 1 + 2 + 8 = 11 timed engines, which would mean the harness
+        // had gone back to re-implementing the parallelism it is supposed to
+        // be delegating.
+        assert_eq!(
+            MADE.load(Ordering::Relaxed),
+            1 + 2 * counts.len(),
+            "native-thread mode builds one engine per point, plus probes"
+        );
+        // Two batch calls per point: one warm, one timed.
+        assert_eq!(BATCHES.load(Ordering::Relaxed), counts.len() * 2);
+        assert!((scaling.points[0].efficiency_pct - 100.0).abs() < 1e-6);
+
+        BATCHES.store(0, Ordering::Relaxed);
+        let independent = measure_scaling_with_mode(
+            &make,
+            &chunks,
+            &counts,
+            1,
+            Padding::Off,
+            ScalingMode::IndependentInstances,
+        )
+        .unwrap();
+        assert_eq!(independent.kind, ScalingKind::IndependentInstances,);
+        assert_eq!(independent.points.len(), counts.len());
+        assert_eq!(
+            BATCHES.load(Ordering::Relaxed),
+            0,
+            "independent instances must use the single-document entry point"
+        );
+    }
+
+    /// A library with its own batch fan-out but no width knob (tokie reads
+    /// `available_parallelism()` and exposes nothing) must still be driven
+    /// through that batch path. The bug this pins: classifying it as
+    /// thread-less and then threading it from outside, which both idles its
+    /// fan-out and reports the harness's curve as the engine's.
+    #[test]
+    fn an_uncontrollable_native_batch_is_never_threaded_by_the_harness() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        static SINGLES: AtomicUsize = AtomicUsize::new(0);
+        static BATCHES: AtomicUsize = AtomicUsize::new(0);
+
+        struct FixedWidth;
+        impl Engine for FixedWidth {
+            fn info(&self) -> Info {
+                Info {
+                    name: "fixed-width",
+                    version: "0",
+                    lang: "rust",
+                    class: Class::Native,
+                    url: "",
+                    also_computes: "",
+                    internally_parallel: true,
+                }
+            }
+            fn encode(&mut self, text: &str, out: &mut Ids) {
+                SINGLES.fetch_add(1, Ordering::Relaxed);
+                out.extend(text.as_bytes().iter().map(|&b| b as u32));
+            }
+            fn has_native_batch(&self) -> bool {
+                true
+            }
+            fn set_threads(&mut self, _threads: usize) -> bool {
+                false
+            }
+            fn encode_batch(&mut self, texts: &[&str], out: &mut Ids) {
+                BATCHES.fetch_add(1, Ordering::Relaxed);
+                for text in texts {
+                    out.extend(text.as_bytes().iter().map(|&b| b as u32));
+                }
+            }
+        }
+
+        let chunks = vec![
+            "warm".repeat(50),
+            "measured one".repeat(50),
+            "measured two".repeat(50),
+        ];
+        SINGLES.store(0, Ordering::Relaxed);
+        BATCHES.store(0, Ordering::Relaxed);
+        let make = || Some(Box::new(FixedWidth) as Box<dyn Engine>);
+
+        let scaling = measure_scaling(&make, &chunks, &[1, 2, 4], 1, Padding::Off).unwrap();
+
+        assert_eq!(
+            scaling.kind,
+            ScalingKind::NativeThreads,
+            "a native batch must use native threads, never unpinned independent instances"
+        );
+        // One point, and `threads: 0` for "the width the engine chose" rather
+        // than a number the harness did not set.
+        assert_eq!(scaling.points.len(), 1);
+        assert_eq!(scaling.points[0].threads, 0);
+        assert_eq!(
+            scaling.points[0].efficiency_pct, 0.0,
+            "no 1-thread baseline exists, so efficiency must not be invented"
+        );
+        assert!(scaling.points[0].mbps > 0.0);
+        // Warm + timed, through the batch path only. Any single-document
+        // `encode` call would mean the harness had threaded it itself.
+        assert_eq!(BATCHES.load(Ordering::Relaxed), 2);
+        assert_eq!(
+            SINGLES.load(Ordering::Relaxed),
+            0,
+            "the harness must not fall back to per-document encode"
+        );
+
+        let independent = measure_scaling_with_mode(
+            &make,
+            &chunks,
+            &[1, 2, 4],
+            1,
+            Padding::Off,
+            ScalingMode::IndependentInstances,
+        )
+        .unwrap();
+        assert!(
+            independent.points.is_empty(),
+            "a fixed-width native pool cannot honestly run as single-threaded instances"
+        );
+    }
+
+    /// An engine with no padding of its own must yield no padded cell at all.
+    /// The failure this prevents is a padded column quietly filled with
+    /// unpadded numbers, which makes every engine in it look equally good at
+    /// something only some of them did.
+    #[test]
+    fn padded_cells_do_not_exist_for_engines_that_cannot_pad() {
+        let chunks = vec![
+            "warm chunk".repeat(50),
+            "measured chunk".repeat(50),
+            "another measured chunk".repeat(50),
+        ];
+        let make = || Some(Box::new(Bytes) as Box<dyn Engine>);
+
+        // `Bytes` takes the default `set_padding`, which accepts Off only.
+        assert!(
+            measure_scaling(&make, &chunks, &[1, 2], 1, Padding::Off).is_some(),
+            "ragged output is always available"
+        );
+        assert!(
+            measure_scaling(&make, &chunks, &[1, 2], 1, Padding::Longest).is_none(),
+            "an engine that cannot pad must report no padded result"
+        );
     }
 
     /// Chunk boundaries must never split a multi-byte character, or engines

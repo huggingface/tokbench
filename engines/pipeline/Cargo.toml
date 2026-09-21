@@ -4,12 +4,13 @@ version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "tokbench engine: the HuggingFace rc0 pipeline (tk-encode + tk-serialize, feat/train_encode_split)."
+description = "tokbench engine: the HuggingFace rc0 pipeline (tk-encode + tk-serialize, tokenizers-rc0)."
 
 [dependencies]
 tokbench-core.workspace = true
+serde_json.workspace = true
 
-# `feat/train_encode_split` — the 1.0.0-rc.0 line. Pinned by REV, not by branch:
+# `tokenizers-rc0` — the 1.0.0-rc.0 line. Pinned by REV, not by branch:
 # the previous pin here was `branch = "poc/target-encode"`, and a branch pin is
 # what let this engine silently keep measuring a decode path that the branch had
 # since replaced. A rev is reproducible, and a stale rev is at least visible.
@@ -21,7 +22,8 @@ tokbench-core.workspace = true
 #
 # tk-encode is edition 2024, so this engine needs a recent toolchain; the rest
 # of the workspace does not.
-tk-encode = { git = "https://github.com/huggingface/tokenizers", rev = "0743ac07cc2c8f5b890aa8c39c4a5400c32a295d", package = "tk-encode", default-features = false, features = [
+tk-encode = { git = "https://github.com/huggingface/tokenizers", rev = "199d9a1338b1ffe672549f4dd80be49af13fab92", package = "tk-encode", default-features = false, features = [
+  "parallelism",
   "normalizers",
   "unicode-scripts",
   "bpe",
@@ -33,10 +35,18 @@ tk-encode = { git = "https://github.com/huggingface/tokenizers", rev = "0743ac07
 # The reader. rc0 has no `Tokenizer::from_file`: building a `PipelineTokenizer`
 # from a `tokenizer.json` is this crate's whole job, and it links no serde.
 #
-# `parallelism` is deliberately NOT enabled, on either crate. The headline is a
-# single-thread number (fairness rule 5), and `Info::internally_parallel: false`
-# below has to stay true.
-tk-serialize = { git = "https://github.com/huggingface/tokenizers", rev = "0743ac07cc2c8f5b890aa8c39c4a5400c32a295d", package = "tk-serialize", default-features = false, features = [
+# `parallelism` IS enabled, on both crates, and that is a reversal worth stating.
+# It used to be off so the headline stayed a single-thread number. But the scaling
+# sweep now drives each engine's own pool (see `core::measure_scaling`), and an
+# engine compiled without its pool can only be threaded from outside -- which is
+# the measurement bug this engine existed to avoid.
+#
+# The headline single-text number is unaffected: `encode_flat` requires
+# `documents.len() > 1`, so one document is never fanned out however many
+# threads the pool has. `Info::internally_parallel` is reported from the thread
+# count actually set, not hardcoded.
+tk-serialize = { git = "https://github.com/huggingface/tokenizers", rev = "199d9a1338b1ffe672549f4dd80be49af13fab92", package = "tk-serialize", default-features = false, features = [
+  "parallelism",
   "deserialize",
   "normalizers",
   "unicode-scripts",
@@ -50,4 +60,4 @@ tk-serialize = { git = "https://github.com/huggingface/tokenizers", rev = "0743a
 # 1.0, and rc0's reader is canonical-only (`version: "2.0"`) by design, so a
 # legacy config has to go through here first. This is exactly what upstream's
 # own `tk-serialize` benches do, and it runs at load time, outside the timer.
-tk-convert = { git = "https://github.com/huggingface/tokenizers", rev = "0743ac07cc2c8f5b890aa8c39c4a5400c32a295d", package = "tk-convert" }
+tk-convert = { git = "https://github.com/huggingface/tokenizers", rev = "199d9a1338b1ffe672549f4dd80be49af13fab92", package = "tk-convert" }

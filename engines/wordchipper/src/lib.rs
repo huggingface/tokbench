@@ -341,6 +341,22 @@ impl Engine for Adapter {
         }
     }
 
+    // NOT wired to wordchipper's own parallelism, and that is a known gap
+    // rather than an oversight -- so this engine still reports an `external`
+    // curve, which the column now says out loud.
+    //
+    // Two things block it. `set_parallel` lives on `TokenizerOptions`, not on
+    // the built `Tokenizer`, so honouring it after construction means keeping
+    // the vocab and rebuilding the tokenizer inside `set_threads`. And it is a
+    // boolean: it requests "threaded implementations" at a width the library
+    // picks, so even once rebuilt the only honest points are 1 and
+    // whatever-it-chose, not a 1/2/4/8 curve.
+    //
+    // Wiring it needs the `set_threads(0) == "your own width"` convention that
+    // `has_native_batch` only half covers today. Left for a follow-up rather
+    // than faked here, because a wrong `internal` label is worse than an
+    // accurate `external` one.
+
     fn encode(&mut self, text: &str, out: &mut Ids) {
         // `Ids` is `Vec<u32>` and the tokenizer is `Tokenizer<u32>`, so this
         // appends straight into the harness's reused buffer — no intermediate

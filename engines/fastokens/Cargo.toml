@@ -13,3 +13,8 @@ tokbench-core.workspace = true
 # from disk that `make models` already fetched; letting an engine reach the
 # network mid-run would put download latency inside a measurement.
 fastokens = { version = "=0.3.1", default-features = false }
+
+# `fastokens::Tokenizer::encode_batch` fans out with `par_iter`, i.e. over rayon's
+# *current* pool. Sizing that pool is how this library's own threading is asked for n
+# threads; it is not a second implementation of it.
+rayon = "1"
