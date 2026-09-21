@@ -31,7 +31,7 @@ def render_dockerfile(revision: str, gigatoken: bool = False) -> str:
     packages = "build-essential ca-certificates clang cmake git jq libssl-dev"
     if gigatoken:
         packages += " lld python3-dev"
-    prepare = "RUN python3 jobs/prepare_gigatoken.py\n" if gigatoken else ""
+    prepare = "RUN python3 hf-jobs/prepare_gigatoken.py\n" if gigatoken else ""
     if gigatoken:
         build = f'''ENV CARGO_BUILD_JOBS=1 \\
     CARGO_PROFILE_RELEASE_DEBUG=0 \\
@@ -69,7 +69,7 @@ RUN git clone https://github.com/huggingface/tokbench.git \\
 WORKDIR /workspace/tokbench
 {prepare}{build}
 
-# A Job overrides this command with jobs/run.sh. The server only keeps the
+# A Job overrides this command with hf-jobs/run.sh. The server only keeps the
 # backing Space healthy and does not execute benchmarks on Space hardware.
 CMD [\"python3\", \"-m\", \"http.server\", \"7860\"]
 """

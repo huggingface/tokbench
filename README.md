@@ -1,266 +1,229 @@
 # tokbench
 
-A fair benchmark of tokenizer implementations.
-
-One folder per engine, one Rust driver on top, **one timing loop** shared by all
-of them, and an id-verification gate so a number is never published for an
-engine that quietly computed something different.
+A fair benchmark of tokenizer implementations. One folder per engine, one
+timing loop per direction, and an id-verification gate so a number is never
+published for an engine that computed something different.
 
 ```
-core/          the fairness contract + the only timing loop
-driver/        the Rust binary: runs the matrix, verifies, writes JSON
-binsize/       minimal program linking one engine, to weigh it
-engines/<name> one folder per engine
-python/        the same protocol, reproduced for interpreted engines
-dashboard.html single-file dark dashboard, drag-and-drop the JSON
+core/          the measurement contract and the timing loops
+driver/        the binary: runs the matrix, verifies, writes JSON
+binsize/       a minimal program linking one engine, to weigh it
+engines/<name> one adapter per engine
+hf-jobs/       reproducible cloud runs on Hugging Face Jobs
+dashboard.html single-file dashboard; drop the JSON onto it
 ```
 
 ## Why another benchmark
 
-Most tokenizer comparisons are not comparisons. They time different functions
-(one engine computes byte offsets, another does not), on different vocabularies,
-with load time folded into encode time, at different thread counts, and without
-ever checking that the two produced the same token ids. Every one of those makes
-a fast engine look faster than it is.
+Most comparisons time different functions, on different vocabularies, with load
+folded into encode, at different thread counts, without checking the two
+produced the same ids.
 
-tokbench fixes the measurement, not the result:
+- **Same work, verified.** Ids are hashed (FNV-1a) against the reference. A
+  mismatch is marked `differ` and never ranked.
+- **Same clock, in-process.** One `Engine::encode`, one `Instant`.
+- **Load is not encode.** Vocabulary and automaton construction happen before
+  the timer, reported as `load_ms`.
+- **No timed pass re-encodes text.** See below.
+- **One thread by default**, and every scaling curve says whose threads.
+- **Extra work is disclosed.** An engine that also computes byte offsets keeps
+  that cost, and the report says so.
 
-1. **Same work, verified.** Every engine's id stream is hashed (FNV-1a) and
-   compared against the reference. Different ids → the cell is marked
-   `mismatch` and is never ranked. Being fast at the wrong answer is not a win.
-2. **Same clock, in-process.** Native engines are called directly through one
-   `Engine::encode` trait and timed by the same `Instant`. No subprocess, no IPC.
-3. **Load is not encode.** Vocabulary parsing and automaton construction happen
-   before the timer and are reported separately as `load_ms`.
-4. **Warm cache, stated.** One untimed pass precedes the timed ones, so
-   cache-heavy engines are measured in the regime real loops reach.
-   `--no-warmup` gives the cold contrast.
-5. **One thread by default, and whose thread is stated.** Engines that
-   parallelise internally are flagged; a whole-machine number is never printed
-   next to a single-core one unlabelled. In the scaling sweep the engine's own
-   parallelism is used wherever it has any, and every curve says whether the
-   threads were the engine's (`native-threads`) or supplied as separate
-   tokenizer instances (`independent-instances`).
-6. **Disclose the extra work.** An engine that also computes byte offsets keeps
-   that cost in its number, and the report says so next to it.
-7. **Decode gets the same ids, from the reference.** Decode is timed over the
-   *reference's* id stream, never over each engine's own encode output —
-   otherwise an engine that merges harder feeds itself fewer, longer tokens and
-   posts a better token rate for strictly less work. The decoded text is hashed
-   and compared against the reference's decoded text, not against the original
-   corpus: a lowercasing or accent-stripping normalizer makes
-   `decode(encode(t)) != t` for a tokenizer that is behaving correctly.
+## The corpus is the experiment
 
-The contract is written out in full at the top of [`core/src/lib.rs`](core/src/lib.rs).
+Throughput is a property of the tokenizer **and the text**. Fast BPE engines
+cache pretokens, so a number largely reports how often the input repeats. gpt2,
+one thread, synthetic text at a controlled pretoken recurrence, ids verified:
 
-## Atomic measurements
+| MB/s | 1.0× unique | 5.3× | 13.9× | 248× | 3655× | real english |
+|---|---:|---:|---:|---:|---:|---:|
+| gigatoken | **55** | 213 | 794 | 1249 | 1188 | 331 |
+| pipeline | 44 | 144 | 449 | 721 | 1013 | 236 |
+| tokenizers 0.23.1 | 6 | 6 | 8 | 11 | 9 | 7 |
 
-Use `measure` when one result is needed without running the rest of the
-benchmark matrix. `--engine`, `--model`, and `--corpus` are repeatable; omitting
-one runs every available value in that dimension. `--engine all` is the explicit
-form of omitting `--engine`. Add `--compare-to` to measure
-one shared comparator and report every target engine's speed as a multiplier
-without adding separate comparator rows.
+Give gigatoken text that never repeats and it falls **23×**; its lead over
+`pipeline` goes from 1.77× to 1.23×. Its headline is its cache, and production
+traffic is not a corpus you encode twice.
 
-```bash
-cargo run --release -p tokbench --features rust-engines -- \
-  measure encode --engine all
-cargo run --release -p tokbench --features rust-engines -- \
-  measure decode --engine pipeline --model gpt2 --corpus eng_Latn
-cargo run --release -p tokbench --features rust-engines -- \
-  measure latency --engine pipeline --model gpt2 --corpus eng_Latn
-cargo run --release -p tokbench --features rust-engines -- \
-  measure scaling --engine pipeline --model gpt2 --corpus eng_Latn --max-threads 8
-cargo run --release -p tokbench --features rust-engines -- \
-  measure memory --engine all --corpus eng_Latn --threads 1 \
-  --scaling-mode independent-instances
-cargo run --release -p tokbench --features rust-engines -- \
-  measure memory --engine all --corpus eng_Latn --threads 8 \
-  --scaling-mode independent-instances
+So timed slices are disjoint — warming on the chunks the reps re-encode once
+overstated gigatoken by 256×. Ablations are heap-verified, so a cache that was
+never disabled cannot be reported as one. Corpora are mixed: on llama-3 `tokie`
+spans 8.5× between English and Chinese, so an English-only ranking reverses on
+CJK. Cross-engine medians use only cells every compared engine verified.
+
+Corpora are public at
+[huggingface/tokbench-corpora](https://huggingface.co/datasets/huggingface/tokbench-corpora)
+— parquet plus the byte-identical `.txt` the driver chunks, so a config name
+there is a `--corpus` here. `make fixtures` pulls them, `CORPORA_REVISION=<sha>`
+pins them. `code-mixed` and `agentic-traces` are not redistributable and stay
+internal.
+
+```python
+load_dataset("huggingface/tokbench-corpora", "japanese")
 ```
 
-Each command writes the normal tokbench JSON schema. It runs only the requested
-measurement family and skips phase breakdown and decode when they were not
-requested. Memory is its own isolated child-process measurement and requires
-exactly one explicit corpus. Interactive runs show one in-place progress bar
-followed by a result table; redirected output omits the progress bar. The
-table keeps one row per model, collapsing multi-corpus runs to medians with a
-completion count. When several target engines are selected,
-each engine becomes a compact column so the model still occupies one row.
-For latency, `--latency-samples` is a maximum: smaller corpora use every
-distinct document they can supply, and the table reports the actual sample
-range.
-Comparison values are medians of matched paired per-corpus ratios. The table
-reports measured and comparable coverage separately. Every raw corpus
-result remains in the JSON. The existing command without `measure` continues
-to run the full benchmark.
+## Measuring
 
-The tokenizers v1 pipeline BPE cache can be sized explicitly for an ablation:
+`tokbench` runs the full matrix; `tokbench measure <family>` runs one.
+`--engine`, `--model` and `--corpus` are repeatable, omit one to sweep it.
 
-```bash
-tokbench measure encode --engine pipeline --cache-capacity 8192
-tokbench measure encode --engine pipeline --cache-capacity 0
+```console
+$ tokbench measure encode --engine pipeline --compare-to hf-tokenizers \
+    --model gpt2 --model llama-3 --corpus english --corpus chinese --corpus code
+
+model         corpora  median MB/s  median ns/B           vs hf-tokenizers
+-------  ------------  -----------  -----------  -------------------------
+gpt2     3/3 measured        231.4         4.12   ×35.74 on 3/3 comparable
+llama-3  3/3 measured        180.7         5.28   ×23.22 on 3/3 comparable
+
+$ tokbench measure decode --engine pipeline --compare-to hf-tokenizers \
+    --model gpt2 --model llama-3 --corpus english --corpus chinese
+
+model         corpora  median MB/s  median ns/token          vs hf-tokenizers
+-------  ------------  -----------  ---------------  ------------------------
+gpt2     2/2 measured        314.2              8.2   ×7.79 on 2/2 comparable
+llama-3  2/2 measured        367.8             10.1   ×6.89 on 2/2 comparable
+
+$ tokbench measure latency --engine pipeline --compare-to hf-tokenizers \
+    --model gpt2 --corpus english
+
+model  p50 us  p99 us  samples  p50 vs hf-tokenizers  p99 vs hf-tokenizers
+-----  ------  ------  -------  --------------------  --------------------
+gpt2     2.25    5.21     1000                ×35.04                ×20.95
 ```
 
-Omitting `--cache-capacity` preserves tokenizers v1's upstream default of
-65,536 entries. The explicit value is stored as
-`dataset_metadata.pipeline_cache_capacity`; `0` disables the cache. Other
-engines are unchanged when they run in the same command.
+| family | what it answers |
+|---|---|
+| `encode` | MB/s and ns/byte, text → ids |
+| `decode` | MB/s of text produced, ns per input token |
+| `latency` | p50/p99 for one short document |
+| `scaling` | throughput against thread count, with efficiency |
+| `memory` | live heap after load and after encode, isolated child |
 
-Scaling honors `--reps` and consumes the full corpus. Every repetition warms
-fresh engine instances on a representative input slice, then times each
-document in the disjoint remainder exactly once. Multi-corpus tables report
-both the median observed efficiency and its corpus range. After the timed
-sweep, an untimed encode pass hashes each engine's token IDs against the
-reference, so a scaling-only report carries the same correctness gate as
-`measure encode`.
+Decode is timed over the *reference's* ids, or an engine that merges harder
+feeds itself fewer tokens and posts a better rate for less work. The decoded
+text is hashed against the reference's, not the corpus, because a lowercasing
+normalizer makes `decode(encode(t)) != t` for a correct tokenizer. No decode
+entry point means `decode_unsupported`, absent from the ranking rather than
+zero in it.
 
-**Who supplies the threads.** `--scaling-mode auto` drives each engine's native
-threads when it exposes them and otherwise uses independent instances. Select
-one strategy explicitly with `--scaling-mode native-threads` or
-`--scaling-mode independent-instances`. Every curve is labelled:
+Scaling curves are labelled `native-threads` or `independent-instances`.
+`--padding off|longest|both` is an axis; the harness never pads on an engine's
+behalf. `--cache-capacity N` sizes the tokenizers v1 BPE cache and `0` disables
+it; every engine is also registered as `<name>-no-cache`, and
+`cache_ablation_verified` records whether that half really held less heap.
 
-| label | meaning |
-| --- | --- |
-| `native-threads` | one engine, told to use *n* threads, handed one batch. What a batch caller gets. |
-| `native-threads`, `n/a @ 0T` | the library fans out but exposes no width knob, so one point at the width it chose. Not a curve: there is no 1-thread baseline, and none is invented. |
-| `independent-instances` | *n* single-threaded tokenizer instances in one process, fed by a shared cursor. |
+## Example results
 
-An engine with a fixed-width native pool cannot run in
-`independent-instances` mode because tokbench cannot guarantee that each
-instance is single-threaded. It reports no curve rather than oversubscribing
-the machine under the wrong label.
+Apple M3 Max, single thread, median of 5 over disjoint slices, warm,
+`add_special_tokens = false`, gpt2 and llama-3 × 8 corpora = 16 cells.
 
-**Padding is an axis, not a footnote.** `--padding off|longest|both` (both by
-default) measures each engine ragged and padded to the batch's longest member.
-Padding is a large and uneven cost -- a fill, often a second pass, sometimes a
-different output layout -- and it is a hard requirement for anyone feeding
-rectangular tensors, so the unpadded number alone is not usable for serving.
-The harness never pads on an engine's behalf: an engine with no native padding
-reports `no native padding` for that cell rather than an unpadded number
-wearing a padded label.
+Encode, over the 3 cells every engine below verified:
+
+| engine | median MB/s | × ref | min | max |
+|---|---:|---:|---:|---:|
+| pipeline | **90** | 10.7× | 49 | 172 |
+| wordchipper | 50 | 6.0× | 44 | 89 |
+| fastokens | 50 | 6.0× | 49 | 57 |
+| tiktoken | 27 | 3.2× | 23 | 32 |
+| kitoken | 25 | 3.0× | 22 | 33 |
+| tokie | 21 | 2.5× | 9 | 79 |
+| tokenizers 0.23.1 <sub>ref</sub> | 8 | 1.0× | 8 | 9 |
+
+Decode, over the 5 cells every decode-capable engine verified:
+
+| engine | median MB/s | × ref | ns/token |
+|---|---:|---:|---:|
+| tokie | **379** | 6.9× | 9.4 |
+| pipeline | 337 | 6.1× | 11.2 |
+| tiktoken | 257 | 4.6× | 16.9 |
+| fastokens | 97 | 1.8× | 43.7 |
+| tokenizers 0.23.1 <sub>ref</sub> | 55 | 1.0× | 78.1 |
+
+Coverage, which must be read next to the ranking:
+
+| engine | verified | ids differ | unsupported |
+|---|---:|---:|---:|
+| tokenizers 0.23.1 <sub>ref</sub> | 16 | — | 0 |
+| pipeline | 16 | 0 | 0 |
+| tiktoken | 16 | 0 | 0 |
+| kitoken | 15 | 1 | 0 |
+| tokie | 13 | 3 | 0 |
+| wordchipper | 12 | 4 | 0 |
+| fastokens | 8 | 0 | 8 |
+| rust-gems-bpe | 0 | 0 | 16 |
+
+## The engines
+
+An engine that cannot run a cell returns `Unsupported` with the reason; ids that
+disagree with the reference are marked `differ` and excluded from every ranking.
+
+| engine | lang | class | notes |
+|---|---|---|---|
+| [hf-tokenizers](engines/hf-tokenizers) | Rust | native | reference and oracle, `tokenizers` 0.23.1 |
+| [pipeline](engines/pipeline) | Rust | native | [tk-encode 1.0.0-rc.0](https://github.com/huggingface/tokenizers) |
+| [kitoken](engines/kitoken) | Rust | native | BPE + Unigram + WordPiece |
+| [tokie](engines/tokie) | Rust | native | |
+| [tiktoken](engines/tiktoken) | Rust | native | needs a derived `ranks.tiktoken` |
+| [fastokens](engines/fastokens) | Rust | native | rejects `tokenizer.json` without `model.type` |
+| [rust-gems-bpe](engines/rust-gems-bpe) | Rust | native | `bpe-openai` only; plain `bpe` has no pre-tokenizer |
+| [wordchipper](engines/wordchipper) | Rust | native | `BpeBacktrack` selector |
+| [gigatoken](engines/gigatoken) | Rust | native | off by default; nightly, links libpython |
+| [sentencepiece](engines/sentencepiece) | C++ | cffi | needs `spiece.model` |
+| [llamacpp](engines/llamacpp) | C++ | cffi | needs a GGUF from `scripts/make_gguf.py` |
+| [iree](engines/iree) | C | cffi | gpt2 only |
+| [executorch](engines/executorch) | C++ | cffi | own process: its static PCRE2 preempts fastokens' and degrades it ~18× with correct ids |
+
+`pipeline` and `hf-tokenizers` are the same project reading the same
+`tokenizer.json`, so the gap is the encode path and nothing else. Decode is
+wired for those two plus `tokie`, `tiktoken` and `fastokens`; the rest report
+`decode_unsupported`. One method per adapter, and a welcome PR.
 
 ## Hugging Face Jobs
 
-[`jobs/`](jobs/) contains a reproducible cloud runner. It builds tokbench into
-an immutable container, requires a pinned input-data revision, runs several
-complete process-level repetitions, records the CPU and software environment,
-and writes raw reports plus checksums to a mounted Storage Bucket. See
-[`jobs/README.md`](jobs/README.md) for the image and submission commands.
-
-After the Job completes, fetch all of its reports and open their median in the
-native dashboard. Add `RUN=3` to inspect one underlying run:
+[`hf-jobs/`](hf-jobs/) runs the benchmark in an immutable container against a
+pinned data revision, over several process-level repetitions, recording the
+environment and writing reports plus checksums to a Storage Bucket:
 
 ```bash
 make dash BUCKET=huggingface/tokbench-results JOB_ID=<job-id>
 ```
 
-The blog's original eight-model encode matrix is available as
-`python jobs/submit.py --profile blog-v1 ...`.
-
-The Jobs runner is intended for reproducible invocation and for measuring
-variance. A hardware flavor does not guarantee that separate Jobs use the same
-physical CPU, so absolute results remain machine-specific.
-
-## Decode
-
-Both directions are measured in the same run. Decode reports two rates, because
-one number cannot answer both questions:
-
-- `decode_mbps` — MB/s of text produced. Same axis as encode's MB/s, so the two
-  columns can sit next to each other.
-- `decode_ns_per_token` — the input-side cost. This is the one to compare when
-  two engines emit text of different lengths from the same ids.
-
-An engine whose library has no decode entry point reports `decode_unsupported`
-and is **absent from the decode ranking rather than scored zero in it** — the
-same treatment `unsupported` gets on the encode side. Wiring one is a single
-`fn decode` on its adapter; the default implementation is what declines.
-
-`--no-decode` skips the pass, along with the extra reference encode that
-produces the shared ids.
-
-## The engines
-
-All sixteen are wired. Where an engine cannot run a cell it returns an explicit
-`Unsupported` with the reason, and where its ids disagree with the reference the
-cell is marked `differ` and excluded from every ranking.
-
-| engine | language | class | status |
-|---|---|---|---|
-| [hf-tokenizers](engines/hf-tokenizers) | Rust | native | **wired** — reference + oracle, 4-phase instrumented |
-| [pipeline](engines/pipeline) | Rust | native | **wired** — the rc0 pipeline, [tk-encode 1.0.0-rc.0](https://github.com/huggingface/tokenizers/tree/5c3727a93bd64cd9caf0e229c637fc71f2cd2fce) |
-| [kitoken](engines/kitoken) | Rust | native | **wired** — BPE + Unigram + WordPiece from one crate |
-| [tokie](engines/tokie) | Rust | native | **wired, verified** |
-| [tiktoken](engines/tiktoken) | Rust | native | **wired, verified** (needs derived `ranks.tiktoken`) |
-| [fastokens](engines/fastokens) | Rust | native | **wired** — rejects tokenizer.json without `model.type` |
-| [rust-gems-bpe](engines/rust-gems-bpe) | Rust | native | **wired** — cl100k/o200k only, see note below |
-| [sentencepiece](engines/sentencepiece) | C++ | cffi | **wired** — needs `spiece.model`, builds libsentencepiece statically |
-| [wordchipper](engines/wordchipper) | Rust | native | **wired** — 29/30 verified; `BpeBacktrack` selector, named in `version` |
-| [gigatoken](engines/gigatoken) | Rust | native | **wired** — 50/50 verified; needs nightly + `-Z profile-rustflags`, links libpython |
-| [blingfire](engines/blingfire) | C++ | cffi | **wired** — runs, but 0/10 verified: its GPT-2 model emits no whitespace tokens |
-| [llamacpp](engines/llamacpp) | C++ | cffi | **wired** — 47/60 verified; slower than HF on every verified byte-level BPE |
-| [iree](engines/iree) | C | cffi | **wired** — gpt2 10/10 byte-exact; 841 kB static lib, 9.6 s build, no CMake |
-| [executorch](engines/executorch) | C++ | cffi | **wired** — 40/40 verified; must run in its own process (PCRE2 clash with fastokens) |
-| [minbpe](engines/minbpe) | Python | subprocess | **wired** — 10/10 verified; the *floor*, not a competitor |
-| [mistral-common](engines/mistral-common) | Python | subprocess | **wired** — 10/10 verified (needs `tekken.json`) |
-| [ai-tokenizer](engines/ai-tokenizer) | JS | subprocess | **wired** — 30/30 verified; builds its Encoding from `ranks.tiktoken` |
-
-**Decode** is wired for `hf-tokenizers` (the decode oracle), `pipeline`, `tokie`,
-`tiktoken` and `fastokens`. The rest report `decode_unsupported` and are absent
-from the decode ranking rather than scored zero in it — nobody has written their
-`fn decode` yet. That is one method per adapter, and a welcome PR.
+A hardware flavor does not pin a physical CPU, so absolute results stay
+machine-specific; what Jobs buys is reproducible invocation and variance.
 
 ## Footprint
 
-Two different questions, both reported, neither a substitute for the other:
-
-- **`crate_size_kb`** — the published package you download (crates.io `.crate`,
-  PyPI wheel, npm unpacked). From `scripts/package_size.py`.
-- **`binary_delta_kb`** — stripped bytes added to a minimal program over a
-  no-engine baseline. From `scripts/binsize.sh`.
-- **`heap_load_mb`** — live heap held after loading the tokenizer.
-- **`heap_encode_mb`** — live heap after encoding the selected corpus, including
-  populated caches and worker state. Both heap values are measured in a
-  **dedicated child process per engine**. `memory_threads` and
-  `memory_parallelism` record whether the result used one native pool or
-  multiple independent tokenizer instances.
+- **`crate_size_kb`** — published package size. `scripts/package_size.py`.
+- **`binary_delta_kb`** — stripped bytes over a no-engine baseline.
+  `scripts/binsize.sh`.
+- **`heap_load_mb` / `heap_encode_mb`** — live heap after load and after
+  encode, one child per engine, because in one process the allocator hands
+  engine B the pages engine A freed. Live heap, not RSS: RSS is a high-water
+  mark that bills a loader for what it already freed.
 
 ## Output
 
-The driver writes `tokenizer_bench_results.json`:
-
 ```json
 {
-  "dataset_metadata": { "file_size_bytes": 1048576, "total_characters": 1000000,
-                        "corpus": "eng_Latn", "model": "gpt2", "reps": 5, "warmup": true },
+  "dataset_metadata": { "corpus": "english", "model": "gpt2", "reps": 5, "warmup": true },
   "results": [
     { "tokenizer_name": "tokie", "total_tokens_produced": 245277,
-      "mean_execution_time_seconds": 0.0028,
-      "breakdown_nanoseconds": { "normalization": 0, "pre_tokenization": 0,
-                                 "core_encoding": 0, "post_processing": 0 },
+      "mean_execution_time_seconds": 0.0028, "mbps": 96.7, "ns_per_byte": 9.86,
       "engine_class": "native", "verified": true, "ids_hash": "47cdd1399a60de5a",
-      "decode_mbps": 412.7, "decode_ns_per_token": 9.8,
-      "decode_text_hash": "b3f1c0a29e4d5107", "decode_verified": true,
-      "rss_delta_mb": 45.4, "crate_size_kb": 181.0 }
+      "decode_mbps": 412.7, "decode_ns_per_token": 9.8, "decode_verified": true,
+      "heap_load_mb": 3.5, "heap_encode_mb": 7.2, "crate_size_kb": 181.0 }
   ],
-  "runs": [ "...one entry per model x corpus cell..." ]
+  "runs": [ "...one entry per model × corpus cell..." ]
 }
 ```
 
-`breakdown_nanoseconds` is **omitted** for engines whose API cannot separate its
-stages. The dashboard renders that as "not instrumented" rather than inventing a
-split, because an invented split is indistinguishable from a measured one once
-it is a coloured bar.
-
-The `decode_*` fields are omitted the same way, and for the same reason: an
-engine with no decode entry point carries `decode_unsupported` with the reason
-instead of a zero that would sort as "slow". Every field is optional, so a
-reader written against the pre-decode schema still parses the document.
+Every field is optional. A cell an engine could not run carries `unsupported`
+with the reason, never a zero that would sort as slow.
 
 ## Adding an engine
 
-Create `engines/<name>/`, implement two traits, add one line to
+Create `engines/<name>/`, implement two traits, add a line to
 `driver/src/registry.rs`:
 
 ```rust
@@ -268,41 +231,29 @@ impl Build for Adapter {
     fn build(model: &Model) -> Result<Box<dyn Engine>, Unsupported> { ... }
 }
 impl Engine for Adapter {
-    fn info(&self) -> Info { ... }                      // version, class, disclosures
-    fn encode(&mut self, text: &str, out: &mut Ids) { } // timed: encode
-    fn phases(&mut self, text: &str) -> Option<Phases> { None }  // optional
-    fn decode(&mut self, ids: &[u32], out: &mut String)          // timed: decode
-        -> Result<(), Unsupported> { ... }                       // optional
+    fn info(&self) -> Info { ... }
+    fn encode(&mut self, text: &str, out: &mut Ids) { }
+    fn decode(&mut self, ids: &[u32], out: &mut String)      // optional
+        -> Result<(), Unsupported> { ... }
 }
 ```
 
-`decode` is the one method that may decline: the default returns `Unsupported`,
-which keeps the engine out of the decode ranking instead of scoring it zero
-there. Implement it if the library has a decode entry point, and return `Err`
-rather than pushing a short string if a particular id cannot be mapped — a
-truncated `out` would otherwise hash as a fast, wrong decode.
-
-Use the library's ordinary public API — the one a user would call. If it forces
-an allocation or a type conversion, that cost stays in the measurement, because
-the user pays it too. Reaching into private internals to skip work the public
-path performs is out of bounds.
+Use the library's ordinary public API. An allocation or conversion it forces
+stays in the measurement, because the user pays it too; reaching into private
+internals to skip work the public path does is out of bounds. `decode` may
+decline — return `Err` rather than pushing a short string, or a truncated `out`
+hashes as a fast, wrong decode.
 
 ## No benchmarking framework
 
-Deliberate, and it is *less* code, not more. `divan` has no machine-readable
-output (JSON/CSV is still a planned feature). `criterion`'s `estimates.json` is
-documented as a private implementation detail that may change without warning,
-needs `cargo-criterion` plus `harness = false`, and owns `fn main()`. Neither
-expresses an engine × model matrix, and neither verifies that two engines
-produced the same ids — the property the whole comparison rests on. Wrapping
-either would mean parsing its output back into this schema. The measurement is
-~25 lines in `tokbench_core::measure`, shared by every engine.
+`divan` has no machine-readable output; `criterion`'s `estimates.json` is a
+private implementation detail and owns `fn main()`. Neither expresses an
+engine × model × corpus matrix, and neither verifies that two engines produced
+the same ids.
 
 ## Licence
 
 Apache-2.0. Each engine remains under its own licence; this repository vendors
 none of them.
-
-## Contributors
 
 Initial development by @ArthurZucker, @SBrandeis, @McPatate, @LysandreJik

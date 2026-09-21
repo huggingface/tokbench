@@ -1,17 +1,7 @@
-//! fastokens — the Crusoe/NVIDIA-Dynamo byte-level BPE encoder, now published
-//! by Atero. Reads HuggingFace `tokenizer.json` directly.
-//!
-//! `encode_ordinary` is used rather than `encode`: it is the "no special
-//! tokens" path, which matches the `add_special_tokens = false` the reference
-//! engine is called with. If a future version changes that meaning, the id
-//! hash stops matching the reference and the report marks the cell as a
-//! mismatch rather than quietly reporting a faster, different computation.
-
 use tokbench_core::{unsupported, Build, Class, Engine, Ids, Info, Model, Unsupported};
 
 pub struct Adapter {
     tok: fastokens::Tokenizer,
-    /// Sized by `set_threads`; the library's `par_iter` runs inside it.
     pool: Option<rayon::ThreadPool>,
     threads: usize,
 }
@@ -55,10 +45,6 @@ impl Engine for Adapter {
         true
     }
 
-    /// `encode_batch` fans out with `par_iter`, so the current rayon pool is
-    /// this library's thread count. Installing a sized pool is the only
-    /// per-instance way to ask for one; `RAYON_NUM_THREADS` is process-wide
-    /// and cannot vary across a sweep.
     fn set_threads(&mut self, threads: usize) -> bool {
         if threads == 0 {
             return false;
@@ -66,8 +52,6 @@ impl Engine for Adapter {
         self.pool = if threads > 1 {
             match rayon::ThreadPoolBuilder::new().num_threads(threads).build() {
                 Ok(pool) => Some(pool),
-                // Refuse rather than fall back to the global pool, which would
-                // report some other width as `threads`.
                 Err(_) => return false,
             }
         } else {
@@ -77,7 +61,6 @@ impl Engine for Adapter {
         true
     }
 
-    /// `fastokens::Tokenizer::encode_batch` — the library's own batch path.
     fn encode_batch(&mut self, texts: &[&str], out: &mut Ids) {
         let encode = || self.tok.encode_batch(texts, false);
         let encoded = match &self.pool {

@@ -1,34 +1,43 @@
-# tokbench — fetch inputs, build, measure.
-#
-# Everything a run needs is reproducible from this file: the corpora, the model
-# artifacts each engine's format requires, and the two footprint side-channels.
+# tokbench — fetch inputs, measure, inspect.
 
 HF ?= uvx --from huggingface_hub hf
 PY ?= python3
 DATA := data
 MODELS := $(DATA)/models
 FIXTURES := $(DATA)/fixtures
+TOKBENCH := cargo run --locked --release -p tokbench --features rust-engines --
+
+# Pin the input data to make a run reproducible.
 HF_TEST_REVISION ?=
 HF_REVISION_ARG := $(if $(strip $(HF_TEST_REVISION)),--revision $(HF_TEST_REVISION),)
+CORPORA_REVISION ?=
+CORPORA_REVISION_ARG := $(if $(strip $(CORPORA_REVISION)),--revision $(CORPORA_REVISION),)
+
 BUCKET ?=
 JOB_ID ?=
 RUN ?=
 RESULTS ?=
 DASH_PORT ?= 8712
 
-# Same fixture set as the upstream tokenizers pipeline benchmark, so numbers
-# stay comparable with it.
-FIXTURE_LANGS := amh_Ethi arb_Arab ben_Beng cmn_Hani ell_Grek eng_Latn heb_Hebr \
-                 hin_Deva jpn_Jpan kat_Geor kor_Hang rus_Cyrl tam_Taml tha_Thai
-# Chat/agent traces and special-token-dense text are their own workload: short
-# turns, many added tokens, and a normalizer path most prose never touches.
-FIXTURE_MODALITIES := agentic-traces agentic_swe code_mixed math_latex \
-                      added_special_dense added_special_sparse \
-                      added_normalized_dense added_normalized_sparse
+# The public corpora. Chat and agent traces are their own workload: short
+# turns, many added tokens, and a normalizer path prose never reaches.
+# Provenance and licences: scripts/corpora_card.md.
+CORPORA_REPO ?= huggingface/tokbench-corpora
+FIXTURE_CORPORA := amharic arabic bengali chinese english georgian greek hebrew \
+                   hindi japanese korean russian tamil thai \
+                   agentic-swe math-latex \
+                   added-special-dense added-special-sparse \
+                   added-normalized-dense added-normalized-sparse \
+                   chat-llama3 chat-chatml chat-mistral chat-deepseek
+
+# Not publicly redistributable, so these stay internal: code-mixed embeds redis
+# (RSALv2/SSPLv1/AGPLv3) and junit5 (EPL-2.0) source verbatim, agentic-traces
+# has no recorded provenance. `local:upstream` because the internal repo still
+# uses the old names.
+FIXTURE_INTERNAL := agentic-traces:agentic-traces code-mixed:code_mixed
 HF_TEST_REPO := hf-internal-testing/tokenizers-test-data
 
-# One model per archetype: the shapes that stress different parts of a
-# tokenizer (regex-heavy byte-level BPE, normalizer-heavy WordPiece, Unigram).
+# One model per archetype: byte-level BPE, WordPiece, Unigram.
 BENCH_MODELS := gpt2 llama-3 deepseek-v4 bert-base-uncased t5-base
 
 .PHONY: all
@@ -37,32 +46,30 @@ all: fixtures models sizes bench
 .PHONY: fixtures
 fixtures:
 	@mkdir -p $(FIXTURES)
-	@for f in $(FIXTURE_LANGS); do \
-	  [ -f $(FIXTURES)/$$f.txt ] || { echo "fetch lang/$$f"; \
-	    $(HF) download $(HF_TEST_REPO) fixtures/lang/$$f.txt --repo-type dataset \
-	      $(HF_REVISION_ARG) \
-	      --local-dir $(DATA)/_dl >/dev/null && \
-	    cp $(DATA)/_dl/fixtures/lang/$$f.txt $(FIXTURES)/ ; } ; \
+	@for f in $(FIXTURE_CORPORA); do \
+	  [ -f $(FIXTURES)/$$f.txt ] || { echo "fetch $$f"; \
+	    $(HF) download $(CORPORA_REPO) fixtures/$$f.txt --repo-type dataset \
+	      $(CORPORA_REVISION_ARG) --local-dir $(DATA)/_dl >/dev/null && \
+	    cp $(DATA)/_dl/fixtures/$$f.txt $(FIXTURES)/ ; } ; \
 	done
-	@for f in $(FIXTURE_MODALITIES); do \
-	  [ -f $(FIXTURES)/$$f.txt ] || { echo "fetch modalities/$$f"; \
-	    $(HF) download $(HF_TEST_REPO) fixtures/modalities/$$f.txt --repo-type dataset \
-	      $(HF_REVISION_ARG) \
-	      --local-dir $(DATA)/_dl >/dev/null && \
-	    cp $(DATA)/_dl/fixtures/modalities/$$f.txt $(FIXTURES)/ ; } ; \
+	@for f in $(FIXTURE_INTERNAL); do \
+	  n=$${f%%:*}; u=$${f##*:}; \
+	  [ -f $(FIXTURES)/$$n.txt ] || { echo "fetch $$n (internal)"; \
+	    $(HF) download $(HF_TEST_REPO) fixtures/modalities/$$u.txt --repo-type dataset \
+	      $(HF_REVISION_ARG) --local-dir $(DATA)/_dl >/dev/null && \
+	    cp $(DATA)/_dl/fixtures/modalities/$$u.txt $(FIXTURES)/$$n.txt ; } ; \
 	done
 	@echo "fixtures ready: $$(ls $(FIXTURES) | wc -l | tr -d ' ') corpora"
 
-# Fetch each model's tokenizer.json, then derive the per-engine artifacts from
-# it. Deriving rather than downloading separately is deliberate: every engine
-# must be measured on the SAME vocabulary, or the comparison is meaningless.
-# Large realistic fixtures: agent traces with tool calls, code, and mixed
-# scripts — rendered through each model's REAL Jinja chat_template, so the
-# bytes are what a served model actually tokenizes.
+# Agent traces, code and mixed scripts, rendered through each model's real
+# Jinja chat_template so the bytes are what a served model tokenizes.
 .PHONY: bigfixtures
 bigfixtures:
 	$(PY) scripts/make_fixtures.py 4
 
+# Fetch each model's tokenizer.json, then derive every other engine's artifact
+# from it. Deriving rather than downloading separately is the point: all
+# engines must be measured on the same vocabulary.
 .PHONY: models
 models:
 	@mkdir -p $(MODELS)
@@ -74,14 +81,13 @@ models:
 	    esac; \
 	    mkdir -p $(MODELS)/$$m && \
 	    $(HF) download $(HF_TEST_REPO) "$$source" --repo-type dataset \
-	      $(HF_REVISION_ARG) \
-	      --local-dir $(DATA)/_dl >/dev/null && \
+	      $(HF_REVISION_ARG) --local-dir $(DATA)/_dl >/dev/null && \
 	    cp "$(DATA)/_dl/$$source" $(MODELS)/$$m/tokenizer.json ; } ; \
 	done
 	@$(PY) scripts/make_artifacts.py $(MODELS)
 
-# Footprint side-channels. Both are optional; the driver omits the columns when
-# the files are absent rather than reporting zeros.
+# Footprint side-channels. Optional: the driver omits the columns rather than
+# reporting zeros when the files are absent.
 .PHONY: sizes
 sizes:
 	$(PY) scripts/package_size.py
@@ -89,30 +95,43 @@ sizes:
 
 .PHONY: bench
 bench:
-	cargo run --locked --release -p tokbench --features rust-engines -- --reps 5
+	$(TOKBENCH) --reps 5
 
 .PHONY: bench-open
 bench-open:
-	cargo run --locked --release -p tokbench --features rust-engines -- --reps 5 --open
+	$(TOKBENCH) --reps 5 --open
+
+# One measurement family instead of the whole matrix.
+.PHONY: encode decode latency scaling memory
+encode:
+	$(TOKBENCH) measure encode --engine all
+decode:
+	$(TOKBENCH) measure decode --engine all
+latency:
+	$(TOKBENCH) measure latency --engine all
+scaling:
+	$(TOKBENCH) measure scaling --engine all --corpus english
+memory:
+	$(TOKBENCH) measure memory --engine all --corpus english
 
 .PHONY: test
 test:
 	cargo test -p tokbench-core
-	$(PY) python/harness.py
-	$(PY) -m unittest discover -s jobs -p 'test_*.py'
+	cargo clippy --features rust-engines --all-targets -- -D warnings
+	cargo fmt --all -- --check
+	$(PY) -m unittest discover -s hf-jobs -p 'test_*.py'
 
 .PHONY: clean
 clean:
 	rm -f tokenizer_bench_results.json binary_sizes.json package_sizes.json
 	cargo clean
 
-# Fetch and aggregate a Job when BUCKET + JOB_ID are set, or stage RESULTS when
-# it names a local report/directory. With no arguments this preserves the local
-# tokenizer_bench_results.json workflow. RUN selects one report; the default is
-# the median across every complete run in the Job.
+# With BUCKET + JOB_ID, fetch and aggregate an HF Job; with RESULTS, stage a
+# local report; with neither, serve the local tokenizer_bench_results.json.
+# RUN selects one report instead of the median across the Job's runs.
 .PHONY: dash
 dash:
-	$(PY) jobs/dash.py \
+	$(PY) hf-jobs/dash.py \
 	  $(if $(BUCKET),--bucket "$(BUCKET)") \
 	  $(if $(JOB_ID),--job-id "$(JOB_ID)") \
 	  $(if $(RUN),--run "$(RUN)") \

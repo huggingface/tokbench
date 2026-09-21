@@ -1,11 +1,9 @@
 name: bench
 
-# Two jobs, on purpose:
-#   * `check` runs everywhere on every push -- it is the correctness gate, and
-#     it must be cheap and stable.
-#   * `bench` runs on a fixed, isolated runner, because throughput measured on
-#     a shared 2-vCPU cloud VM is noise. A number produced on a noisy runner is
-#     worse than no number: it looks authoritative and moves 30% between runs.
+# `check` is the correctness gate and runs on every push. `bench` does not run
+# on pull requests: throughput measured on a shared cloud VM moves ~30% between
+# runs, and a number that looks authoritative but is not is worse than none.
+# Reproducible numbers come from `hf-jobs/`.
 
 on:
   push:
@@ -35,17 +33,11 @@ jobs:
       - name: core harness tests
         run: cargo test -p tokbench-core
 
-      # The Python harness must stay behaviourally identical to the Rust one or
-      # scripted engines silently become incomparable. Its __main__ block
-      # asserts the chunker is lossless and pins the FNV-1a constants.
-      - name: python protocol self-check
-        run: python3 python/harness.py
-
       - name: build all Rust engines
         run: cargo check -p tokbench --features rust-engines --all-targets
 
       - name: clippy
-        run: cargo clippy -p tokbench-core -p tokbench --features rust-engines -- -D warnings
+        run: cargo clippy -p tokbench-core -p tokbench --features rust-engines --all-targets -- -D warnings
 
       - name: fmt
         run: cargo fmt --all -- --check
@@ -54,8 +46,6 @@ jobs:
     permissions:
       contents: read
     name: measure
-    # Only on demand / on main: a benchmark on a PR from a fork would run on a
-    # different machine class and the comparison would be meaningless.
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     steps:

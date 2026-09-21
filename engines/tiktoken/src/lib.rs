@@ -1,25 +1,4 @@
-//! tiktoken (OpenAI), through `tiktoken-rs`.
-//!
-//! tiktoken does not read `tokenizer.json`; it wants a rank file and a split
-//! pattern. Rather than reimplement the byte-level-vocab → ranks conversion
-//! here in Rust, this engine consumes two artifacts that `make models`
-//! generates from the SAME `tokenizer.json` every other engine loads:
-//!
-//! * `ranks.tiktoken` — the standard `<base64-token> <rank>` per line format.
-//! * `pattern.txt`    — the pre-tokenizer regex.
-//!
-//! Doing the conversion once, offline, in `scripts/make_artifacts.py` keeps it
-//! out of the measured path and keeps this adapter honest: if the conversion
-//! were wrong, the ids would diverge from the reference and the report would
-//! mark the cell as a mismatch instead of publishing a bogus speedup.
-//!
-//! No artifacts → `Unsupported`. A blank cell with a reason is a truthful
-//! result; tiktoken genuinely cannot load an arbitrary Unigram or WordPiece
-//! model, and pretending otherwise would be the dishonest option.
-
 use base64::Engine as _;
-// tiktoken-rs builds its tables with rustc-hash, and `CoreBPE::new` takes
-// `FxHashMap` specifically — a `std::HashMap` will not coerce.
 use rustc_hash::FxHashMap;
 use tiktoken_rs::CoreBPE;
 use tokbench_core::{unsupported, Build, Class, Engine, Ids, Info, Model, Unsupported};
@@ -66,9 +45,6 @@ impl Build for Adapter {
         let pattern = std::fs::read_to_string(&pattern_path)
             .map_err(|e| Unsupported(format!("reading pattern.txt: {e}")))?;
 
-        // Empty special-token map: the reference is called with
-        // `add_special_tokens = false`, and `encode_ordinary` below never
-        // consults specials anyway. Keeping it empty makes that explicit.
         let bpe = CoreBPE::new(encoder, FxHashMap::default(), pattern.trim())
             .map_err(|e| Unsupported(format!("CoreBPE::new: {e}")))?;
         Ok(Box::new(Adapter { bpe }))
@@ -92,9 +68,6 @@ impl Engine for Adapter {
         out.extend_from_slice(&self.bpe.encode_ordinary(text));
     }
 
-    /// `CoreBPE::decode` concatenates the raw token bytes and validates UTF-8.
-    /// No `tokenizer.json` decoder runs, because tiktoken has no such concept
-    /// — for the byte-level BPE models it supports, that is the whole job.
     fn decode(&mut self, ids: &[u32], out: &mut String) -> Result<(), Unsupported> {
         match self.bpe.decode(ids) {
             Ok(s) => {

@@ -1,8 +1,5 @@
 [workspace]
 resolver = "2"
-# Listed explicitly rather than `engines/*`: three engine folders
-# (minbpe, mistral-common, ai-tokenizer) hold a script, not a crate, because
-# they are benchmarked by re-running the protocol inside their own runtime.
 members = [
     "core",
     "driver",
@@ -16,33 +13,22 @@ members = [
     "engines/rust-gems-bpe",
     "engines/wordchipper",
     "engines/sentencepiece",
-    "engines/blingfire",
     "engines/gigatoken",
     "engines/llamacpp",
     "engines/iree",
     "engines/executorch",
 ]
 
-# Benchmark numbers are only comparable if every engine is compiled the same
-# way. These settings apply to every member, so no engine can win on profile
-# flags. `lto = "fat"` + `codegen-units = 1` is what a release consumer of these
-# libraries would ship; `debug = 1` keeps `perf`/Instruments symbols without
-# affecting codegen.
+# One profile for every member, so no engine can win on compile flags.
+# `panic = "unwind"` is load-bearing: the driver catches a panicking engine and
+# records the cell as failed instead of losing the whole matrix.
 [profile.release]
 opt-level = 3
 lto = "fat"
 codegen-units = 1
 debug = 1
-# Unwinding, NOT abort. The driver runs third-party code over adversarial
-# inputs, and some of it panics (tokie 0.1.4 indexes out of bounds on a
-# truncated vocabulary). With `panic = "abort"` one bad engine takes the whole
-# matrix down and 79 good cells are lost; with unwind the driver catches it,
-# records "panicked" for that cell, and carries on. A benchmark harness has to
-# survive the thing it is benchmarking.
 
-# The size probe ships the flags a real minimal build would use — matching
-# tokenizers#2293's methodology (opt-level=z, panic=abort, cgu=1, lto=fat,
-# stripped) so the numbers are comparable with the ones quoted there.
+# What a minimal release consumer would ship, for the binary-size probe.
 [profile.binsize]
 inherits = "release"
 opt-level = "z"

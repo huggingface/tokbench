@@ -30,4 +30,4 @@ ENV TOKBENCH_SOURCE_REVISION=${TOKBENCH_REVISION} \
 RUN test "${TOKBENCH_REVISION}" != unknown \
     && cargo build --locked --release -p tokbench --features rust-engines
 
-CMD ["bash", "jobs/run.sh"]
+CMD ["bash", "hf-jobs/run.sh"]

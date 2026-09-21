@@ -130,11 +130,6 @@
 --------------------------------------------------------------------------- */
 
 const $ = (s) => document.querySelector(s);
-const PHASES = [
-  ["normalization","Normalization"],["pre_tokenization","Pre-tokenization"],
-  ["core_encoding","Core encoding"],["post_processing","Post-processing"],
-];
-const PHASE_COLORS = ["#5b8cff","#3ddc97","#ffb020","#c77dff"];
 const REF = "hf-tokenizers";
 
 /* Sequential ramp, dark -> bright. Reads correctly on a dark background and
@@ -577,17 +572,10 @@ function render(){
       </div>
     </div>
 
-    <div class="grid two" style="margin-bottom:16px">
-      <div class="panel">
-        <h2>Throughput &amp; efficiency — ${esc(S.model)} / ${esc(S.corpus)}</h2>
-        <p class="hint">Tokens per second against nanoseconds per byte, separate axes.</p>
-        <div id="c-speed" class="chart"></div>
-      </div>
-      <div class="panel">
-        <h2>Where the time goes — ${esc(S.model)} / ${esc(S.corpus)}</h2>
-        <p class="hint">Share of encode time per stage. Pre-tokenization is broken out because it is usually the bottleneck. <b>Two kinds of measurement.</b> <code>hf-tokenizers</code> clocks each component directly. <code>pipeline</code> subtracts successive monomorphised <code>STAGE</code> rungs. Both are measured with a cold cache -- every rep gets a fresh scratch -- so neither is credited for having already seen the text being timed, and the proportions are comparable. The totals are not the headline encode time: a cold merge loop does work the real run's warm cache skips.</p>
-        <div id="c-phase" class="chart"></div>
-      </div>
+    <div class="panel" style="margin-bottom:16px">
+      <h2>Throughput &amp; efficiency — ${esc(S.model)} / ${esc(S.corpus)}</h2>
+      <p class="hint">Tokens per second against nanoseconds per byte, separate axes.</p>
+      <div id="c-speed" class="chart"></div>
     </div>
 
     <div class="panel" style="margin-bottom:16px">
@@ -631,10 +619,8 @@ function drawScaling(){
       +'Re-run with <code>--scaling &lt;corpus&gt;</code> (e.g. <code>--scaling english</code>).</span></div>';
     if(mtEl) mtEl.innerHTML=msg; if(effEl) effEl.innerHTML=msg; return;
   }
-  // Only engines whose ids MATCH on this cell. A scaling curve for a different
-  // id stream is a curve for a different computation — blingfire, for
-  // instance, posts 93% efficiency on gpt2/english while producing none of the
-  // whitespace tokens, so plotting it beside the others invites a false read.
+  // Only engines whose ids match on this cell: a curve for a different id
+  // stream is a curve for a different computation.
   const hasCurve=(r)=>r&&!r.unsupported&&r.scaling?.length;
   const rows=X.engines.map(e=>X.get(S.model,cor,e))
     .filter(r=>hasCurve(r)&&(r.verified!==false||VERIFY_EXEMPT.has(r.tokenizer_name)));
@@ -750,31 +736,6 @@ function drawCell(){
           itemStyle:{color:x.verified===false?"#5a4020":"#3ddc97",borderRadius:[3,3,0,0]}}))},
     ],
   }); else $("#c-speed").innerHTML='<div class="empty">No engine ran this cell.</div>';
-
-  // phases
-  const p=rows.filter(x=>x.breakdown_nanoseconds);
-  if(!p.length) $("#c-phase").innerHTML='<div class="empty">No engine here reports a phase breakdown.<br>'
-    +'<span style="font-size:12px">Only engines whose API exposes stages separately are instrumented; the rest are left blank rather than given an invented split.</span></div>';
-  else {
-    const tot=p.map(x=>PHASES.reduce((s,[k])=>s+(x.breakdown_nanoseconds[k]||0),0));
-    mk($("#c-phase"),{
-      grid:{left:8,right:22,top:40,bottom:8,containLabel:true},
-      legend:{data:PHASES.map(x=>x[1]),textStyle:{color:"#8b95a7"},top:0,itemWidth:12,itemHeight:12},
-      tooltip:{...TOOLTIP,trigger:"axis",axisPointer:{type:"shadow"},formatter(ps){
-        const i=ps[0].dataIndex,x=p[i],t=tot[i];
-        return `<b>${esc(x.tokenizer_name)}</b><br>`+PHASES.map(([k,l],j)=>{
-          const ns=x.breakdown_nanoseconds[k]||0;
-          return `<div><span style="display:inline-block;width:9px;height:9px;border-radius:2px;background:${PHASE_COLORS[j]};margin-right:6px"></span>
-            ${l}: <b>${(ns/t*100).toFixed(1)}%</b> <span style="color:#8b95a7">(${fmt.dur(ns)})</span></div>`;
-        }).join("")+`<div style="color:#8b95a7;margin-top:4px">total ${fmt.dur(t)}</div>`;
-      }},
-      xAxis:{type:"value",max:100,...AXIS,axisLabel:{...AXIS.axisLabel,formatter:"{value}%"}},
-      yAxis:{type:"category",data:p.map(x=>x.tokenizer_name),...AXIS,splitLine:{show:false}},
-      series:PHASES.map(([k,l],j)=>({name:l,type:"bar",stack:"t",barMaxWidth:26,
-        itemStyle:{color:PHASE_COLORS[j]},
-        data:p.map((x,i)=>tot[i]?(x.breakdown_nanoseconds[k]||0)/tot[i]*100:0)})),
-    });
-  }
 
   // footprint — one row per engine, deduped across the matrix
   const seen=new Map();
@@ -908,7 +869,7 @@ function buildTables(metric){
     {key:"rss",label:"RAM",cell:r=>num(r.rss,fmt.mb)},
     {key:"pkg",label:"Package",cell:r=>num(r.pkg,fmt.kb)},
     {key:"bin",label:"+binary gz",cell:r=>num(r.bin,fmt.kb)},
-    {key:"cls",label:"Class",cell:r=>`<td><span class="badge ${r.cls==="native"?"b-ok":r.cls==="subprocess"?"b-warn":"b-dim"}">${esc(r.cls||"?")}</span></td>`},
+    {key:"cls",label:"Class",cell:r=>`<td><span class="badge ${r.cls==="native"?"b-ok":"b-dim"}">${esc(r.cls||"?")}</span></td>`},
   ]};
 
   paintTable("summary");
@@ -961,38 +922,35 @@ const drop=$("#drop");
 drop.addEventListener("drop",e=>{const f=e.dataTransfer.files?.[0];if(f)readFile(f);});
 $("#file").addEventListener("change",e=>{if(e.target.files[0])readFile(e.target.files[0]);});
 
-/* Sample data: a small matrix with the honest edge cases in it — an
-   unsupported engine, an id mismatch on Unigram, an uninstrumented breakdown —
-   so the layout can be judged before a real run exists. */
+/* Sample data, with the edge cases in it — an unsupported engine, an id
+   mismatch on Unigram — so the layout can be judged before a real run. */
 const MOCK=(()=>{
   const models=["gpt2","llama-3","albert"], corpora=["english","chinese","code","thai","arabic"];
-  const base={ "hf-tokenizers":11, "pipeline":500, "tokie":70, "tiktoken":31, "mistral-common":13 };
+  const base={ "hf-tokenizers":11, "pipeline":500, "tokie":70, "tiktoken":31, "kitoken":26 };
   const runs=[];
   for(const m of models) for(const c of corpora){
     const bytes=200000, results=[];
     for(const [name,b] of Object.entries(base)){
       if(name==="tiktoken"&&m==="albert"){ results.push({tokenizer_name:name,unsupported:"tiktoken has no Unigram"}); continue; }
-      if(name==="mistral-common"&&m!=="llama-3"){ results.push({tokenizer_name:name,unsupported:"no tekken.json"}); continue; }
       const scale={english:1,chinese:.45,code:.8,thai:.5,arabic:.6}[c]*(m==="albert"?.25:m==="llama-3"?1.2:1);
       const mbps=b*scale, secs=(bytes/(1024*1024))/mbps;
       const badIds=(name==="pipeline"||name==="tokie")&&m==="albert";
       results.push({tokenizer_name:name,total_tokens_produced:Math.round(bytes/4.2),
         mean_execution_time_seconds:secs,mbps,ns_per_byte:secs*1e9/bytes,
-        engine_version:name,engine_lang:name==="mistral-common"?"python":"rust",
-        engine_class:name==="mistral-common"?"subprocess":"native",
+        engine_version:name,engine_lang:"rust",
+        engine_class:"native",
         also_computes:name==="hf-tokenizers"?"byte offsets, word ids, attention mask":"",
         internally_parallel:false,load_ms:name==="hf-tokenizers"?74:40,
         ids_hash:badIds?"deadbeef":"47cdd139",verified:name===REF?true:!badIds,
-        rss_delta_mb:{ "hf-tokenizers":35,"pipeline":33,"tokie":43,"tiktoken":12,"mistral-common":58 }[name],
-        crate_size_kb:{ "hf-tokenizers":191.6,"pipeline":null,"tokie":181,"tiktoken":3699.4,"mistral-common":6400 }[name],
+        rss_delta_mb:{ "hf-tokenizers":35,"pipeline":33,"tokie":43,"tiktoken":12,"kitoken":11 }[name],
+        crate_size_kb:{ "hf-tokenizers":191.6,"pipeline":null,"tokie":181,"tiktoken":3699.4,"kitoken":63 }[name],
         package_ref:name==="tokie"?"tokie 0.1.4 (crates.io)":"",
-        ...(name==="hf-tokenizers"?{breakdown_nanoseconds:{normalization:1500,pre_tokenization:90525501,core_encoding:30660291,post_processing:13704329}}:{}),
         // Scaling only on the corpus the sweep was asked for, as in a real run.
         // Efficiency decays differently per engine on purpose: that contrast is
         // the whole point of the chart.
         ...(c==="english"?{scaling:[1,2,4,8].map(n=>{
           const eff={ "hf-tokenizers":[100,72,48,29],"pipeline":[100,96,91,84],"tokie":[100,93,85,74],
-                      "tiktoken":[100,88,76,61],"mistral-common":[100,55,31,18] }[name][[1,2,4,8].indexOf(n)];
+                      "tiktoken":[100,88,76,61],"kitoken":[100,90,80,66] }[name][[1,2,4,8].indexOf(n)];
           return {threads:n,mbps:mbps*n*eff/100,efficiency_pct:eff};
         })}:{})});
     }

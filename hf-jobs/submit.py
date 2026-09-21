@@ -25,8 +25,8 @@ BLOG_V1_LIBRARY_ENGINES = (
 BLOG_V1_GIGATOKEN_LIBRARY_ENGINES = (
     "pipeline,gigatoken,kitoken,fastokens,tokie,tiktoken,wordchipper"
 )
-BLOG_V1_SCALING = "eng_Latn,cmn_Hani"
-BLOG_V1_LATENCY = "eng_Latn"
+BLOG_V1_SCALING = "english,chinese"
+BLOG_V1_LATENCY = "english"
 
 
 def parse_args() -> argparse.Namespace:
@@ -39,7 +39,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--input-revision",
         required=True,
-        help="Commit SHA of hf-internal-testing/tokenizers-test-data",
+        help="Commit SHA of hf-internal-testing/tokenizers-test-data (models)",
+    )
+    parser.add_argument(
+        "--corpora-revision",
+        required=True,
+        help="Commit SHA of the public corpora dataset",
     )
     parser.add_argument(
         "--bucket",
@@ -218,14 +223,17 @@ def main() -> None:
             "--image must use an immutable @sha256: digest "
             "(or pass --allow-mutable-image)"
         )
-    if len(args.input_revision) != 40 or any(
-        c not in "0123456789abcdefABCDEF" for c in args.input_revision
+    for flag, value in (
+        ("--input-revision", args.input_revision),
+        ("--corpora-revision", args.corpora_revision),
     ):
-        raise SystemExit("--input-revision must be a full 40-character commit SHA")
+        if len(value) != 40 or any(c not in "0123456789abcdefABCDEF" for c in value):
+            raise SystemExit(f"{flag} must be a full 40-character commit SHA")
 
     env = {
         "TOKBENCH_IMAGE": args.image,
         "TOKBENCH_INPUT_REVISION": args.input_revision,
+        "TOKBENCH_CORPORA_REVISION": args.corpora_revision,
         "TOKBENCH_RUNS": str(args.runs),
         "TOKBENCH_REPS": str(args.reps),
         "TOKBENCH_PROFILE": args.profile,
@@ -249,7 +257,7 @@ def main() -> None:
             json.dumps(
                 {
                     "image": args.image,
-                    "command": ["bash", "jobs/run.sh"],
+                    "command": ["bash", "hf-jobs/run.sh"],
                     "flavor": args.flavor,
                     "namespace": args.namespace,
                     "timeout": args.timeout,
@@ -282,7 +290,7 @@ def main() -> None:
 
     job = run_job(
         image=args.image,
-        command=["bash", "jobs/run.sh"],
+        command=["bash", "hf-jobs/run.sh"],
         flavor=args.flavor,
         namespace=args.namespace,
         timeout=args.timeout,

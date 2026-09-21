@@ -24,7 +24,7 @@ clones the exact tokbench commit:
 
 ```bash
 revision=$(git rev-parse HEAD)
-python jobs/publish_space.py \
+python hf-jobs/publish_space.py \
   --repo-id "$USER/tokbench-jobs-${revision:0:7}"
 ```
 
@@ -39,10 +39,11 @@ Install a current `huggingface_hub`, log in, and use a writable Storage Bucket.
 The test-data revision must be a commit SHA, not `main`:
 
 ```bash
-python jobs/submit.py \
+python hf-jobs/submit.py \
   --image hf.co/spaces/<user>/tokbench-jobs-<commit> \
   --allow-mutable-image \
   --input-revision <tokenizers-test-data-commit> \
+  --corpora-revision <tokbench-corpora-commit> \
   --bucket huggingface/tokbench-results
 ```
 
@@ -58,11 +59,12 @@ and Chinese, and call-level latency over 1,000 distinct 512-byte English
 documents:
 
 ```bash
-python jobs/submit.py \
+python hf-jobs/submit.py \
   --profile blog-v1 \
   --image hf.co/spaces/<user>/tokbench-jobs-<commit> \
   --allow-mutable-image \
   --input-revision <tokenizers-test-data-commit> \
+  --corpora-revision <tokbench-corpora-commit> \
   --bucket huggingface/tokenizers-v1-benchmarks
 ```
 
@@ -80,11 +82,12 @@ same eight models and 22 corpora without running the other measurement
 families:
 
 ```bash
-python jobs/submit.py \
+python hf-jobs/submit.py \
   --profile blog-v1-libraries \
   --image hf.co/spaces/<user>/tokbench-jobs-<commit> \
   --allow-mutable-image \
   --input-revision <tokenizers-test-data-commit> \
+  --corpora-revision <tokbench-corpora-commit> \
   --bucket huggingface/tokenizers-v1-benchmarks
 ```
 
@@ -110,7 +113,7 @@ image after pushing the tokbench commit:
 
 ```bash
 revision=$(git rev-parse HEAD)
-python jobs/publish_space.py \
+python hf-jobs/publish_space.py \
   --gigatoken \
   --repo-id "$USER/tokbench-jobs-gigatoken-${revision:0:7}"
 ```
@@ -118,17 +121,18 @@ python jobs/publish_space.py \
 Then run the same single-thread comparison with Gigatoken included:
 
 ```bash
-python jobs/submit.py \
+python hf-jobs/submit.py \
   --profile blog-v1-libraries-gigatoken \
   --image hf.co/spaces/<user>/tokbench-jobs-gigatoken-<commit> \
   --allow-mutable-image \
   --input-revision <tokenizers-test-data-commit> \
+  --corpora-revision <tokbench-corpora-commit> \
   --bucket huggingface/tokenizers-v1-benchmarks
 ```
 
-The image recipe runs `jobs/prepare_gigatoken.py` in its disposable checkout.
+The image recipe runs `hf-jobs/prepare_gigatoken.py` in its disposable checkout.
 That script enables the exact Gigatoken revision recorded in the adapter and
-installs `jobs/Cargo.gigatoken.lock` as the build lockfile. The benchmark Job
+installs `hf-jobs/Cargo.gigatoken.lock` as the build lockfile. The benchmark Job
 uses that prebuilt binary. The image builds one crate at a time and uses LLVM's
 linker to keep the fat-LTO build within the Docker Space builder's memory limit.
 Both library profiles use one thread and do not
@@ -137,6 +141,10 @@ request CPU affinity because they do not run a scaling measurement.
 The private `hf-internal-testing/tokenizers-test-data` input requires an HF
 token. By default the submitter forwards the locally configured token as an
 encrypted Job secret. It is not written to the environment manifest.
+
+The corpora come from the public dataset instead and are pinned separately with
+`--corpora-revision`, since the two repos move independently. Both SHAs are
+mandatory: `main` is not reproducible.
 
 ## Artifacts
 
