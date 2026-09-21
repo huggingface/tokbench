@@ -115,12 +115,12 @@ rustup toolchain install nightly-2026-08-05 --profile minimal --component rust-s
 tokbench measure crate-size
 ```
 
-By default the command downloads the pinned tokenizers revision and uses the
-GPT-2 fixture only to prove that the linked pre-split executable can load a real
-configuration. `--tokenizers-source ../tokenizers` measures a local checkout,
-`--model NAME` changes that load fixture, and `--out PATH` changes the output.
-The report records both tokenizers revisions, both Rust versions, the platform
-and the cargo-matrix version.
+The command uses pinned tokenizers dependencies from `binsize/Cargo.toml` and
+the root `Cargo.lock`. The GPT-2 fixture only proves that the linked pre-split
+executable can load a real configuration. `--model NAME` changes that load
+fixture, and `--out PATH` changes the output. The report records both
+tokenizers revisions, both Rust versions, the platform and the cargo-matrix
+version.
 
 Decode is timed over the *reference's* ids, or an engine that merges harder
 feeds itself fewer tokens and posts a better rate for less work. The decoded

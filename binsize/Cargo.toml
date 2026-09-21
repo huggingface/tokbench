@@ -6,6 +6,11 @@ license.workspace = true
 repository.workspace = true
 description = "Minimal program linking exactly one engine, so its contribution to a binary can be measured."
 
+[[bin]]
+name = "tokenizers-crate-size"
+path = "src/crate_size.rs"
+required-features = ["crate-bpe"]
+
 # Deliberately NOT part of the driver. A `src/bin/` inside `tokbench` would
 # link clap, serde and regex too, and those megabytes would swamp the number
 # this crate exists to isolate. Here the only things linked are core (which has
@@ -27,6 +32,14 @@ tokbench-llamacpp = { path = "../engines/llamacpp", optional = true }
 tokbench-iree = { path = "../engines/iree", optional = true }
 tokbench-executorch = { path = "../engines/executorch", optional = true }
 
+# The crate-decomposition probe is pinned independently from the runtime
+# pipeline engine. These dependencies are exercised by `measure crate-size`.
+tk-encode-size = { package = "tk-encode", git = "https://github.com/huggingface/tokenizers", rev = "484be1d3351077fc5c0b81e876c94814c08ef3eb", default-features = false, optional = true }
+tk-serialize-size = { package = "tk-serialize", git = "https://github.com/huggingface/tokenizers", rev = "484be1d3351077fc5c0b81e876c94814c08ef3eb", default-features = false, features = ["bpe", "deserialize"], optional = true }
+tk-convert-size = { package = "tk-convert", git = "https://github.com/huggingface/tokenizers", rev = "484be1d3351077fc5c0b81e876c94814c08ef3eb", default-features = false, optional = true }
+tk-train-size = { package = "tk-train", git = "https://github.com/huggingface/tokenizers", rev = "484be1d3351077fc5c0b81e876c94814c08ef3eb", default-features = false, optional = true }
+ahash = { version = "0.8.12", optional = true }
+
 [features]
 # No default: an empty build is the baseline every engine is measured against.
 default = []
@@ -43,3 +56,22 @@ gigatoken = ["dep:tokbench-gigatoken"]
 llamacpp = ["dep:tokbench-llamacpp"]
 iree = ["dep:tokbench-iree"]
 executorch = ["dep:tokbench-executorch"]
+
+crate-bpe = ["dep:tk-encode-size", "tk-encode-size/bpe"]
+crate-serialize = ["dep:tk-serialize-size"]
+crate-convert = ["dep:tk-convert-size"]
+crate-train = ["dep:tk-train-size", "tk-encode-size/wordlevel"]
+crate-unigram = ["tk-encode-size/unigram"]
+crate-wordpiece = ["dep:ahash", "tk-encode-size/wordpiece"]
+crate-wordlevel = ["dep:ahash", "tk-encode-size/wordlevel"]
+crate-normalizers = ["tk-encode-size/normalizers"]
+crate-unicode-scripts = ["tk-encode-size/unicode-scripts"]
+crate-parallelism = ["tk-encode-size/parallelism"]
+
+[[package.metadata.cargo-matrix.channel]]
+name = "default"
+
+[[package.metadata.cargo-matrix.channel]]
+name = "crate-sizes"
+seed = ["crate-unigram", "crate-wordpiece", "crate-wordlevel", "crate-normalizers", "crate-unicode-scripts", "crate-parallelism"]
+always_include = ["crate-bpe"]

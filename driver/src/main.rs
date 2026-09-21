@@ -75,11 +75,6 @@ struct Args {
     #[arg(long, default_value = "tokenizer_bench_results.json", global = true)]
     out: PathBuf,
 
-    /// Use this tokenizers checkout for `measure crate-size` instead of the
-    /// command's pinned revision.
-    #[arg(long, global = true)]
-    tokenizers_source: Option<PathBuf>,
-
     #[arg(long, global = true)]
     open: bool,
 
@@ -1272,7 +1267,7 @@ fn measure_crate_size(args: &Args) -> Result<()> {
         );
     }
 
-    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("../scripts/crate_size/measure.py");
+    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("../scripts/crate_size.py");
     let output = if args.out == Path::new("tokenizer_bench_results.json") {
         PathBuf::from("crate_sizes.json")
     } else {
@@ -1285,9 +1280,6 @@ fn measure_crate_size(args: &Args) -> Result<()> {
         .arg(&tokenizer)
         .arg("--output")
         .arg(&output);
-    if let Some(source) = &args.tokenizers_source {
-        command.arg("--tokenizers").arg(source);
-    }
     let status = command
         .status()
         .with_context(|| format!("run {}", script.display()))?;

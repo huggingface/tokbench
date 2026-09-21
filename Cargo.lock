@@ -166,6 +166,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5e764a1d40d510daf35e07be9eb06e75770908c27d411ee6c92109c9840eaaf7"
 
 [[package]]
+name = "bitcanon"
+version = "0.1.0-rc.0"
+source = "git+https://github.com/huggingface/tokenizers?rev=484be1d3351077fc5c0b81e876c94814c08ef3eb#484be1d3351077fc5c0b81e876c94814c08ef3eb"
+dependencies = [
+ "ahash",
+]
+
+[[package]]
 name = "bitflags"
 version = "2.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2517,12 +2525,49 @@ checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
 
 [[package]]
 name = "tk-convert"
+version = "0.1.0-rc.0"
+source = "git+https://github.com/huggingface/tokenizers?rev=484be1d3351077fc5c0b81e876c94814c08ef3eb#484be1d3351077fc5c0b81e876c94814c08ef3eb"
+dependencies = [
+ "bitcanon",
+ "serde_json",
+ "thiserror 2.0.19",
+]
+
+[[package]]
+name = "tk-convert"
 version = "1.0.0-rc.0"
 source = "git+https://github.com/huggingface/tokenizers?rev=199d9a1338b1ffe672549f4dd80be49af13fab92#199d9a1338b1ffe672549f4dd80be49af13fab92"
 dependencies = [
  "bitsplit",
  "serde_json",
  "thiserror 2.0.19",
+]
+
+[[package]]
+name = "tk-encode"
+version = "0.1.0-rc.0"
+source = "git+https://github.com/huggingface/tokenizers?rev=484be1d3351077fc5c0b81e876c94814c08ef3eb#484be1d3351077fc5c0b81e876c94814c08ef3eb"
+dependencies = [
+ "ahash",
+ "bitcanon",
+ "dary_heap",
+ "itertools 0.15.0",
+ "libc",
+ "log",
+ "memchr",
+ "paste",
+ "ptr_hash",
+ "rand 0.10.2",
+ "rayon",
+ "rayon-cond",
+ "spm_precompiled",
+ "thiserror 2.0.19",
+ "unicode-normalization",
+ "unicode-normalization-alignments",
+ "unicode-segmentation",
+ "unicode_categories",
+ "wide",
+ "yada",
 ]
 
 [[package]]
@@ -2554,13 +2599,42 @@ dependencies = [
 
 [[package]]
 name = "tk-serialize"
+version = "0.1.0-rc.0"
+source = "git+https://github.com/huggingface/tokenizers?rev=484be1d3351077fc5c0b81e876c94814c08ef3eb#484be1d3351077fc5c0b81e876c94814c08ef3eb"
+dependencies = [
+ "base64 0.22.1",
+ "bitcanon",
+ "hifijson",
+ "tk-encode 0.1.0-rc.0",
+]
+
+[[package]]
+name = "tk-serialize"
 version = "1.0.0-rc.0"
 source = "git+https://github.com/huggingface/tokenizers?rev=199d9a1338b1ffe672549f4dd80be49af13fab92#199d9a1338b1ffe672549f4dd80be49af13fab92"
 dependencies = [
  "base64 0.22.1",
  "bitsplit",
  "hifijson",
- "tk-encode",
+ "tk-encode 1.0.0-rc.0",
+]
+
+[[package]]
+name = "tk-train"
+version = "0.1.0-rc.0"
+source = "git+https://github.com/huggingface/tokenizers?rev=484be1d3351077fc5c0b81e876c94814c08ef3eb#484be1d3351077fc5c0b81e876c94814c08ef3eb"
+dependencies = [
+ "ahash",
+ "compact_str",
+ "dary_heap",
+ "esaxx-rs",
+ "itertools 0.14.0",
+ "log",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.19",
+ "tk-convert 0.1.0-rc.0",
+ "tk-encode 0.1.0-rc.0",
 ]
 
 [[package]]
@@ -2593,6 +2667,11 @@ dependencies = [
 name = "tokbench-binsize"
 version = "0.1.0"
 dependencies = [
+ "ahash",
+ "tk-convert 0.1.0-rc.0",
+ "tk-encode 0.1.0-rc.0",
+ "tk-serialize 0.1.0-rc.0",
+ "tk-train",
  "tokbench-core",
  "tokbench-executorch",
  "tokbench-fastokens",
@@ -2675,9 +2754,9 @@ name = "tokbench-pipeline"
 version = "0.1.0"
 dependencies = [
  "serde_json",
- "tk-convert",
- "tk-encode",
- "tk-serialize",
+ "tk-convert 1.0.0-rc.0",
+ "tk-encode 1.0.0-rc.0",
+ "tk-serialize 1.0.0-rc.0",
  "tokbench-core",
 ]
 
