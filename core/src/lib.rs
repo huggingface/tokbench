@@ -5,8 +5,9 @@
 //!    ranked.
 //! 2. Load, vocabulary parsing and automaton construction happen before the
 //!    clock starts.
-//! 3. Warm-up and every timed rep get disjoint slices, so no engine is ever
-//!    handed text it has already encoded.
+//! 3. Warm-up and every timed rep get distinct documents. Workloads that
+//!    deliberately share text, such as a common prompt prefix, state that in
+//!    their report metadata.
 //! 4. Single thread by default; the scaling sweep is a separate, labelled axis.
 //! 5. Adapters call the library's ordinary public API. A conversion the public
 //!    path forces stays in the number, because the user pays it too.
@@ -207,6 +208,54 @@ pub fn chunk(text: &str, chunk_bytes: usize, max_chunks: usize) -> Vec<String> {
         start = end;
     }
     out
+}
+
+/// Distinct requests made from one real corpus, all sharing the same prefix.
+///
+/// The prefix and every suffix are taken verbatim from `text`. Suffixes are
+/// disjoint, so no two requests are identical and the only deliberately
+/// repeated input is the prefix itself.
+pub fn shared_prefix_documents(
+    text: &str,
+    prefix_bytes: usize,
+    document_bytes: usize,
+    max_documents: usize,
+) -> (Vec<String>, usize) {
+    if prefix_bytes == 0 || document_bytes <= prefix_bytes + 1 || max_documents == 0 {
+        return (Vec::new(), 0);
+    }
+
+    let mut prefix_end = prefix_bytes.min(text.len());
+    while prefix_end > 0 && !text.is_char_boundary(prefix_end) {
+        prefix_end -= 1;
+    }
+    if prefix_end == 0 {
+        return (Vec::new(), 0);
+    }
+
+    let prefix = &text[..prefix_end];
+    let suffix_bytes = document_bytes - prefix.len() - 1;
+    let mut cursor = prefix_end;
+    let mut documents = Vec::with_capacity(max_documents);
+    while cursor < text.len() && documents.len() < max_documents {
+        while cursor < text.len() && !text.is_char_boundary(cursor) {
+            cursor += 1;
+        }
+        let mut end = (cursor + suffix_bytes).min(text.len());
+        while end > cursor && !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        if end == cursor {
+            break;
+        }
+        let mut document = String::with_capacity(prefix.len() + 1 + end - cursor);
+        document.push_str(prefix);
+        document.push('\n');
+        document.push_str(&text[cursor..end]);
+        documents.push(document);
+        cursor = end;
+    }
+    (documents, prefix.len())
 }
 
 fn median(mut v: Vec<f64>) -> f64 {
@@ -1236,5 +1285,24 @@ mod tests {
         for c in chunk(&text, 100, 50) {
             assert!(std::str::from_utf8(c.as_bytes()).is_ok());
         }
+    }
+
+    #[test]
+    fn shared_prefix_requests_repeat_only_the_prefix() {
+        let text = (0..500).map(|i| format!("文書{i:04} ")).collect::<String>();
+        let (documents, prefix_bytes) = shared_prefix_documents(&text, 101, 240, 8);
+
+        assert_eq!(documents.len(), 8);
+        assert!(prefix_bytes <= 101);
+        assert!(documents.iter().all(|document| document.len() <= 240));
+        let prefix = &documents[0][..prefix_bytes];
+        assert!(documents
+            .iter()
+            .all(|document| document.starts_with(prefix)));
+        let suffixes: std::collections::BTreeSet<_> = documents
+            .iter()
+            .map(|document| &document[prefix_bytes + 1..])
+            .collect();
+        assert_eq!(suffixes.len(), documents.len());
     }
 }

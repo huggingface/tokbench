@@ -48,7 +48,13 @@ def platform_name() -> str:
                 ["sysctl", "-n", "machdep.cpu.brand_string"], text=True,
                 stderr=subprocess.DEVNULL).strip()
         except subprocess.CalledProcessError:
-            pass
+            hardware = subprocess.run(
+                ["system_profiler", "SPHardwareDataType"], text=True,
+                capture_output=True)
+            for line in hardware.stdout.splitlines():
+                if line.strip().startswith("Chip:"):
+                    cpu = line.split(":", 1)[1].strip()
+                    break
     return f"{cpu}, {host_triple()}"
 
 
@@ -129,6 +135,15 @@ def main() -> None:
         baseline = gz_size(initial_binary)
         print(f"{'before crate split':36} {baseline:9,d} B")
 
+        canonical = temporary / "canonical.json"
+        canonical.write_text(
+            '{"version":"2.0","added_tokens":[],"normalizer":null,'
+            '"pre_tokenizer":null,"post_processor":null,"decoder":null,'
+            '"model":{"type":"BPE","byte_level":false,'
+            '"vocab":{"a":0,"b":1,"ab":2,"abab":3},'
+            '"merges":[["a","b"],["ab","ab"]]},"padding":null}'
+        )
+
         def build(profile: str, features: list[str], toolchain: str = STABLE,
                   extra: tuple[str, ...] = (), extra_env: dict[str, str] | None = None) -> Path:
             command = [cargo, f"+{toolchain}", "build", "--quiet", "--locked",
@@ -144,7 +159,7 @@ def main() -> None:
         for enabled in itertools.product((False, True), repeat=len(CRATES)):
             selected = [name for name, on in zip(CRATES, enabled) if on]
             binary = build("minsize", ["crate-bpe", *[f"crate-{x}" for x in selected]])
-            run([binary, args.model.resolve()], stdout=subprocess.DEVNULL)
+            run([binary, canonical], stdout=subprocess.DEVNULL)
             key = "+".join(selected) or "encode"
             configs[key] = gz_size(binary)
             print(f"{key:36} {configs[key]:9,d} B")

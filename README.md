@@ -95,6 +95,7 @@ gpt2     2.25    5.21     1000                ×35.04                ×20.95
 | family | what it answers |
 |---|---|
 | `encode` | MB/s and ns/byte, text → ids |
+| `prefix-sharing` | encode throughput for distinct requests with one shared prompt prefix |
 | `decode` | MB/s of text produced, ns per input token |
 | `latency` | p50/p99 for one short document |
 | `scaling` | throughput against thread count, with efficiency |
@@ -113,6 +114,11 @@ Scaling curves are labelled `native-threads` or `independent-instances`.
 behalf. `--cache-capacity N` sizes the tokenizers v1 BPE cache and `0` disables
 it; every engine is also registered as `<name>-no-cache`, and
 `cache_ablation_verified` records whether that half really held less heap.
+
+`measure prefix-sharing` takes its prefix and non-overlapping suffixes verbatim
+from the selected corpus. It defaults to 100 distinct 10 KiB requests with a
+shared 8 KiB prefix. `--prefix-bytes`, `--request-bytes` and `--requests`
+record a different scenario explicitly in the report.
 
 ## Example results
 

@@ -11,8 +11,8 @@ use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use serde::{Deserialize, Serialize};
 use tokbench_core::{
-    chunk, measure, measure_decode, measure_latency, measure_scaling_with_mode, Ids, Model,
-    ScalingMode,
+    chunk, measure, measure_decode, measure_latency, measure_scaling_with_mode,
+    shared_prefix_documents, Ids, Model, ScalingMode,
 };
 
 const CHUNK_BYTES: usize = 10 * 1024;
@@ -21,6 +21,7 @@ const MAX_CHUNKS: usize = 100;
 #[derive(Subcommand, Clone, Copy, Debug, PartialEq, Eq)]
 enum MeasureCommand {
     Encode,
+    PrefixSharing,
     Decode,
     Latency,
     Scaling,
@@ -53,6 +54,18 @@ struct Args {
 
     #[arg(long, default_value_t = 5, global = true)]
     reps: usize,
+
+    /// Bytes shared at the start of every request in `measure prefix-sharing`.
+    #[arg(long, default_value_t = 8 * 1024, global = true)]
+    prefix_bytes: usize,
+
+    /// Total bytes in each request in `measure prefix-sharing`.
+    #[arg(long, default_value_t = 10 * 1024, global = true)]
+    request_bytes: usize,
+
+    /// Number of distinct requests in `measure prefix-sharing`.
+    #[arg(long, default_value_t = 100, global = true)]
+    requests: usize,
 
     #[arg(long, global = true)]
     no_warmup: bool,
@@ -154,6 +167,16 @@ struct DatasetMetadata {
     warmup: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pipeline_cache_capacity: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    shared_prefix_bytes: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    request_bytes: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    requests: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    shared_prefix_preview: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    unique_suffix_preview: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
@@ -433,7 +456,7 @@ fn print_collapsed_measurement_table(
     }
     headers.push("corpora".into());
     match measurement {
-        MeasureCommand::Encode => {
+        MeasureCommand::Encode | MeasureCommand::PrefixSharing => {
             headers.extend(["median MB/s", "median ns/B"].map(str::to_string))
         }
         MeasureCommand::Decode => {
@@ -489,7 +512,7 @@ fn print_collapsed_measurement_table(
             row.push(engine);
         }
         match measurement {
-            MeasureCommand::Encode => {
+            MeasureCommand::Encode | MeasureCommand::PrefixSharing => {
                 let complete: Vec<_> = entries
                     .iter()
                     .filter(|(result, _)| result.unsupported.is_none())
@@ -917,7 +940,9 @@ fn print_measurement_table(runs: &[Run], measurement: MeasureCommand, compare_to
         headers.push("engine".to_string());
     }
     match measurement {
-        MeasureCommand::Encode => headers.extend(["MB/s", "ns/B", "tokens"].map(str::to_string)),
+        MeasureCommand::Encode | MeasureCommand::PrefixSharing => {
+            headers.extend(["MB/s", "ns/B", "tokens"].map(str::to_string))
+        }
         MeasureCommand::Decode => headers.extend(["MB/s", "ns/token"].map(str::to_string)),
         MeasureCommand::Latency => {
             headers.extend(["p50 us", "p99 us", "samples"].map(str::to_string))
@@ -975,7 +1000,7 @@ fn print_measurement_table(runs: &[Run], measurement: MeasureCommand, compare_to
             }
             let unsupported = result.unsupported.as_deref();
             match measurement {
-                MeasureCommand::Encode => {
+                MeasureCommand::Encode | MeasureCommand::PrefixSharing => {
                     row.push(
                         unsupported.map_or_else(|| format!("{:.1}", result.mbps), |_| "-".into()),
                     );
@@ -1298,7 +1323,9 @@ fn main() -> Result<()> {
     if measurement == Some(MeasureCommand::CrateSize) {
         return measure_crate_size(&args);
     }
-    let run_encode = measurement.is_none() || measurement == Some(MeasureCommand::Encode);
+    let run_prefix_sharing = measurement == Some(MeasureCommand::PrefixSharing);
+    let run_encode =
+        measurement.is_none() || measurement == Some(MeasureCommand::Encode) || run_prefix_sharing;
     let run_decode = match measurement {
         Some(command) => command == MeasureCommand::Decode,
         None => !args.no_decode,
@@ -1307,6 +1334,17 @@ fn main() -> Result<()> {
     let run_scaling = measurement == Some(MeasureCommand::Scaling);
     let run_memory_atomic = measurement == Some(MeasureCommand::Memory);
     let run_memory = run_memory_atomic || (measurement.is_none() && !args.no_memory);
+    if run_prefix_sharing {
+        if args.prefix_bytes == 0 {
+            bail!("--prefix-bytes must be greater than zero");
+        }
+        if args.request_bytes <= args.prefix_bytes + 1 {
+            bail!("--request-bytes must leave room for a suffix after the shared prefix");
+        }
+        if args.requests < args.reps + 1 {
+            bail!("--requests must provide at least one warm-up request and one per repetition");
+        }
+    }
     if !run_memory_atomic && args.threads.get() != 1 {
         bail!("--threads is available with `tokbench measure memory` only");
     }
@@ -1434,7 +1472,7 @@ fn main() -> Result<()> {
     }
     let want = |n: &str| {
         args.engine.is_empty()
-            || all_engines
+            || (all_engines && !n.ends_with("-no-cache"))
             || args.engine.iter().any(|engine| engine == n)
             || args.compare_to.as_deref() == Some(n)
     };
@@ -1463,11 +1501,16 @@ fn main() -> Result<()> {
             "{} worker(s), {} parallelism, median of {} isolated runs",
             args.threads, args.scaling_mode, args.reps
         ),
+        Some(MeasureCommand::PrefixSharing) => format!(
+            "{} distinct {}-byte requests sharing a {}-byte prefix, {} reps",
+            args.requests, args.request_bytes, args.prefix_bytes, args.reps
+        ),
         _ => format!("{} reps each", args.reps),
     };
     if let Some(measurement) = measurement {
         let name = match measurement {
             MeasureCommand::Encode => "encode",
+            MeasureCommand::PrefixSharing => "prefix-sharing",
             MeasureCommand::Decode => "decode",
             MeasureCommand::Latency => "latency",
             MeasureCommand::Scaling => "scaling",
@@ -1516,7 +1559,29 @@ fn main() -> Result<()> {
                 eprintln!("  skip {corpus_name}: unreadable");
                 continue;
             };
-            let chunks = chunk(&text, CHUNK_BYTES, MAX_CHUNKS);
+            let (chunks, actual_prefix_bytes) = if run_prefix_sharing {
+                shared_prefix_documents(&text, args.prefix_bytes, args.request_bytes, args.requests)
+            } else {
+                (chunk(&text, CHUNK_BYTES, MAX_CHUNKS), 0)
+            };
+            if run_prefix_sharing && chunks.len() != args.requests {
+                bail!(
+                    "{corpus_name} provides only {} of {} requested shared-prefix documents",
+                    chunks.len(),
+                    args.requests
+                );
+            }
+            let (shared_prefix_preview, unique_suffix_preview) = if run_prefix_sharing {
+                let request = chunks.first().expect("prefix-sharing has requests");
+                let prefix = &request[..actual_prefix_bytes];
+                let suffix = &request[actual_prefix_bytes + 1..];
+                (
+                    Some(prefix.chars().take(900).collect()),
+                    Some(suffix.chars().take(600).collect()),
+                )
+            } else {
+                (None, None)
+            };
             let bytes: usize = chunks.iter().map(|c| c.len()).sum();
             let chars: usize = chunks.iter().map(|c| c.chars().count()).sum();
             let measure_scaling_for_corpus =
@@ -1918,6 +1983,11 @@ fn main() -> Result<()> {
                     reps: args.reps,
                     warmup: !args.no_warmup,
                     pipeline_cache_capacity: args.cache_capacity,
+                    shared_prefix_bytes: run_prefix_sharing.then_some(actual_prefix_bytes),
+                    request_bytes: run_prefix_sharing.then_some(args.request_bytes),
+                    requests: run_prefix_sharing.then_some(chunks.len()),
+                    shared_prefix_preview: shared_prefix_preview.clone(),
+                    unique_suffix_preview: unique_suffix_preview.clone(),
                 },
                 results,
             });
@@ -2355,6 +2425,7 @@ mod tests {
     fn parses_each_atomic_measurement() {
         for (name, expected) in [
             ("encode", MeasureCommand::Encode),
+            ("prefix-sharing", MeasureCommand::PrefixSharing),
             ("decode", MeasureCommand::Decode),
             ("latency", MeasureCommand::Latency),
             ("scaling", MeasureCommand::Scaling),
@@ -2421,6 +2492,32 @@ mod tests {
         .unwrap();
 
         assert_eq!(args.cache_capacity, Some(0));
+    }
+
+    #[test]
+    fn parses_prefix_sharing_workload() {
+        let args = Args::try_parse_from([
+            "tokbench",
+            "measure",
+            "prefix-sharing",
+            "--prefix-bytes",
+            "4096",
+            "--request-bytes",
+            "8192",
+            "--requests",
+            "60",
+        ])
+        .unwrap();
+
+        assert!(matches!(
+            args.command,
+            Some(CliCommand::Measure {
+                command: MeasureCommand::PrefixSharing
+            })
+        ));
+        assert_eq!(args.prefix_bytes, 4096);
+        assert_eq!(args.request_bytes, 8192);
+        assert_eq!(args.requests, 60);
     }
 
     #[test]

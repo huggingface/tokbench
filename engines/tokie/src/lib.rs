@@ -65,6 +65,16 @@ impl Engine for Adapter {
     }
 
     fn decode(&mut self, ids: &[u32], out: &mut String) -> Result<(), Unsupported> {
+        if let Some(id) = ids
+            .iter()
+            .copied()
+            .find(|&id| id as usize >= self.tok.vocab_size())
+        {
+            return unsupported(format!(
+                "token id {id} is outside tokie's {}-entry vocabulary",
+                self.tok.vocab_size()
+            ));
+        }
         match self.tok.decode(ids) {
             Some(s) => {
                 out.push_str(&s);
