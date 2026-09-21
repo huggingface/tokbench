@@ -36,6 +36,17 @@ panic = "abort"
 strip = true
 debug = 0
 
+# The tokenizers crate decomposition uses these upstream profile names.
+[profile.minsize]
+inherits = "release"
+opt-level = "z"
+panic = "abort"
+strip = true
+debug = 0
+
+[profile.slimest]
+inherits = "minsize"
+
 [workspace.package]
 edition = "2021"
 license = "Apache-2.0"

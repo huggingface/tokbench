@@ -99,6 +99,7 @@ gpt2     2.25    5.21     1000                ×35.04                ×20.95
 | `latency` | p50/p99 for one short document |
 | `scaling` | throughput against thread count, with efficiency |
 | `memory` | live heap after load and after encode, isolated child |
+| `crate-size` | linked executable size across the tokenizers v1 crate and feature matrix |
 
 Decode is timed over the *reference's* ids, or an engine that merges harder
 feeds itself fewer tokens and posts a better rate for less work. The decoded
