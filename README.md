@@ -47,27 +47,47 @@ tokbench fixes the measurement, not the result:
 **Throughput is not a property of the tokenizer. It is a property of the
 tokenizer and the text.** Every fast BPE implementation caches pretokens, so
 throughput tracks how often the input repeats itself. `pipeline` / gpt2, one
-thread, median of 9, three runs — the only thing changed is the cache:
+thread, median of 9 — the only thing changed is the cache:
 
 | corpus | cache on | cache off | cache is worth | heap on | heap off |
 |---|---:|---:|---:|---:|---:|
-| code | 302 | 203 | **1.50×** | 7.2 MB | 3.6 MB |
-| japanese | 74 | 73 | 1.02× | 9.2 MB | 3.7 MB |
-| chinese | 92 | 89 | 1.04× | 11.5 MB | 3.7 MB |
-| english | 217 | 236 | **0.92×** | 7.2 MB | 3.6 MB |
+| agentic-swe | 332 | 174 | **1.90×** | 7.3 MB | 3.6 MB |
+| math-latex | 238 | 188 | 1.26× | 7.2 MB | 3.6 MB |
+| chat-llama3 | 307 | 288 | 1.07× | 7.2 MB | 3.6 MB |
+| japanese | 77 | 76 | 1.01× | 9.2 MB | 3.7 MB |
+| chinese | 88 | 92 | 0.95× | 11.5 MB | 3.7 MB |
+| english | 228 | 238 | 0.96× | 7.2 MB | 3.6 MB |
 
-The cache is worth 50% on source code, where identifiers and indentation recur
-constantly. On Chinese and Japanese it buys nothing and costs 5–8 MB, because
-pretokens barely recur there. On English it is **a net loss** — the lookup
-costs more than the merges it skips.
+The cache nearly doubles throughput on agent traces, where identifiers, diffs
+and indentation recur constantly. On CJK it buys nothing and costs 5–8 MB,
+because pretokens barely recur. On English prose it is a **net loss**.
 
-The heap columns are not decoration. They are what proves the cache was
-actually off: asking a third-party library to drop its cache is a request, and
-a library that ignores it returns a perfectly ordinary-looking number. That
-happened here — `pipeline-no-cache` reported the cached engine for as long as
-the config reader dropped `cache_capacity` on the floor. The driver now refuses
-to call a row an ablation unless the cache-free half holds less live heap than
-its twin (`cache_ablation_verified`). Three things follow:
+That last row is worth dwelling on, because it is not what a cache is supposed
+to do and the obvious explanations are both wrong. It is not a broken ablation
+— the heap columns show the cache really is gone, and the driver now refuses to
+call a row an ablation unless the cache-free half holds less live heap
+(`cache_ablation_verified`; `pipeline-no-cache` once reported the cached engine
+for as long as the config reader dropped `cache_capacity` on the floor). And it
+is not eviction pressure — growing the table only makes it worse:
+
+| cache slots | 0 | 65 536 | 262 144 | 1 048 576 | 4 194 304 |
+|---|---:|---:|---:|---:|---:|
+| english MB/s | **238** | 230 | 204 | 176 | 167 |
+
+The cache does work, and it responds to repetition exactly as it should.
+Feeding gpt2 synthetic text at a controlled recurrence rate:
+
+| pretoken recurrence | 1.0× | 5.3× | 6.9× | 13.9× | 59.4× | 248× | 3655× |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| cache is worth | 0.95× | 2.17× | 2.71× | **3.79×** | 3.40× | 2.70× | 2.31× |
+
+So the payoff is `hit rate × (merge cost saved − lookup cost)`, and on real
+English prose that product is ≈ 0. The merges this engine skips are cheap
+enough that the hash lookup cancels them. **The same cache in front of a slower
+merge loop is worth far more** — which is exactly why engines whose design rests
+on an unbounded pretoken cache post their best numbers on English, and why that
+number describes their merge loop's weakness as much as their cache's strength.
+Three things follow:
 
 **An unbounded cache measures repetition, not tokenization.** gigatoken seeds
 ~50k entries and doubles rather than evicting, and posts extraordinary numbers.
@@ -93,6 +113,21 @@ An English-only benchmark ranks these three in an order that reverses on CJK.
 **Equal ground.** Cross-engine medians are computed only over cells every
 compared engine ran and verified, or the median rewards engines that skip the
 hard cases.
+
+**And they are public.** The corpora live in
+[huggingface/tokbench-corpora](https://huggingface.co/datasets/huggingface/tokbench-corpora),
+as parquet for reading and as the byte-identical `.txt` the driver chunks. A
+config name there is exactly a `--corpus` argument here.
+
+```python
+load_dataset("huggingface/tokbench-corpora", "japanese")
+```
+
+`make fixtures` pulls the text; `CORPORA_REVISION=<sha>` pins it to a commit.
+Two corpora are not redistributable and stay in the internal repo, which
+`make fixtures` still reaches for: `code-mixed` carries copyleft source
+verbatim, and `agentic-traces` has no recorded provenance. The dataset card
+lists provenance and licence per corpus.
 
 ## Measuring
 

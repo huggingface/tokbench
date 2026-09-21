@@ -44,11 +44,11 @@ class SubmitProfileTests(unittest.TestCase):
         self.assertEqual(config["engines"], BLOG_V1_ENGINES)
         self.assertEqual(config["measure"], "")
         self.assertEqual(config["compare_to"], "")
-        self.assertEqual(config["scaling"], "eng_Latn,cmn_Hani")
+        self.assertEqual(config["scaling"], "english,chinese")
         self.assertEqual(config["max_threads"], "8")
         self.assertEqual(config["no_decode"], "0")
         self.assertEqual(config["pin_physical_cores"], "1")
-        self.assertEqual(config["latency"], "eng_Latn")
+        self.assertEqual(config["latency"], "english")
         self.assertEqual(config["scaling_mode"], "auto")
 
     def test_blog_profile_rejects_matrix_overrides(self) -> None:
@@ -102,10 +102,10 @@ class SubmitProfileTests(unittest.TestCase):
 
     def test_default_profile_retains_decode_and_custom_selection(self) -> None:
         config = resolve_benchmark(
-            args(models="gpt2", scaling="eng_Latn", max_threads=4)
+            args(models="gpt2", scaling="english", max_threads=4)
         )
         self.assertEqual(config["models"], "gpt2")
-        self.assertEqual(config["scaling"], "eng_Latn")
+        self.assertEqual(config["scaling"], "english")
         self.assertEqual(config["max_threads"], "4")
         self.assertEqual(config["no_decode"], "0")
         self.assertEqual(config["pin_physical_cores"], "0")

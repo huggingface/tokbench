@@ -43,6 +43,7 @@ python hf-jobs/submit.py \
   --image hf.co/spaces/<user>/tokbench-jobs-<commit> \
   --allow-mutable-image \
   --input-revision <tokenizers-test-data-commit> \
+  --corpora-revision <tokbench-corpora-commit> \
   --bucket huggingface/tokbench-results
 ```
 
@@ -63,6 +64,7 @@ python hf-jobs/submit.py \
   --image hf.co/spaces/<user>/tokbench-jobs-<commit> \
   --allow-mutable-image \
   --input-revision <tokenizers-test-data-commit> \
+  --corpora-revision <tokbench-corpora-commit> \
   --bucket huggingface/tokenizers-v1-benchmarks
 ```
 
@@ -85,6 +87,7 @@ python hf-jobs/submit.py \
   --image hf.co/spaces/<user>/tokbench-jobs-<commit> \
   --allow-mutable-image \
   --input-revision <tokenizers-test-data-commit> \
+  --corpora-revision <tokbench-corpora-commit> \
   --bucket huggingface/tokenizers-v1-benchmarks
 ```
 
@@ -123,6 +126,7 @@ python hf-jobs/submit.py \
   --image hf.co/spaces/<user>/tokbench-jobs-gigatoken-<commit> \
   --allow-mutable-image \
   --input-revision <tokenizers-test-data-commit> \
+  --corpora-revision <tokbench-corpora-commit> \
   --bucket huggingface/tokenizers-v1-benchmarks
 ```
 
@@ -137,6 +141,10 @@ request CPU affinity because they do not run a scaling measurement.
 The private `hf-internal-testing/tokenizers-test-data` input requires an HF
 token. By default the submitter forwards the locally configured token as an
 encrypted Job secret. It is not written to the environment manifest.
+
+The corpora come from the public dataset instead and are pinned separately with
+`--corpora-revision`, since the two repos move independently. Both SHAs are
+mandatory: `main` is not reproducible.
 
 ## Artifacts
 

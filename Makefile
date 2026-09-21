@@ -10,6 +10,8 @@ TOKBENCH := cargo run --locked --release -p tokbench --features rust-engines --
 # Pin the input data to make a run reproducible.
 HF_TEST_REVISION ?=
 HF_REVISION_ARG := $(if $(strip $(HF_TEST_REVISION)),--revision $(HF_TEST_REVISION),)
+CORPORA_REVISION ?=
+CORPORA_REVISION_ARG := $(if $(strip $(CORPORA_REVISION)),--revision $(CORPORA_REVISION),)
 
 BUCKET ?=
 JOB_ID ?=
@@ -17,13 +19,22 @@ RUN ?=
 RESULTS ?=
 DASH_PORT ?= 8712
 
-FIXTURE_LANGS := amh_Ethi arb_Arab ben_Beng cmn_Hani ell_Grek eng_Latn heb_Hebr \
-                 hin_Deva jpn_Jpan kat_Geor kor_Hang rus_Cyrl tam_Taml tha_Thai
-# Chat and agent traces are their own workload: short turns, many added tokens,
-# and a normalizer path prose never reaches.
-FIXTURE_MODALITIES := agentic-traces agentic_swe code_mixed math_latex \
-                      added_special_dense added_special_sparse \
-                      added_normalized_dense added_normalized_sparse
+# The public corpora. Chat and agent traces are their own workload: short
+# turns, many added tokens, and a normalizer path prose never reaches.
+# Provenance and licences: scripts/corpora_card.md.
+CORPORA_REPO ?= huggingface/tokbench-corpora
+FIXTURE_CORPORA := amharic arabic bengali chinese english georgian greek hebrew \
+                   hindi japanese korean russian tamil thai \
+                   agentic-swe math-latex \
+                   added-special-dense added-special-sparse \
+                   added-normalized-dense added-normalized-sparse \
+                   chat-llama3 chat-chatml chat-mistral chat-deepseek
+
+# Not publicly redistributable, so these stay internal: code-mixed embeds redis
+# (RSALv2/SSPLv1/AGPLv3) and junit5 (EPL-2.0) source verbatim, agentic-traces
+# has no recorded provenance. `local:upstream` because the internal repo still
+# uses the old names.
+FIXTURE_INTERNAL := agentic-traces:agentic-traces code-mixed:code_mixed
 HF_TEST_REPO := hf-internal-testing/tokenizers-test-data
 
 # One model per archetype: byte-level BPE, WordPiece, Unigram.
@@ -35,17 +46,18 @@ all: fixtures models sizes bench
 .PHONY: fixtures
 fixtures:
 	@mkdir -p $(FIXTURES)
-	@for f in $(FIXTURE_LANGS); do \
-	  [ -f $(FIXTURES)/$$f.txt ] || { echo "fetch lang/$$f"; \
-	    $(HF) download $(HF_TEST_REPO) fixtures/lang/$$f.txt --repo-type dataset \
-	      $(HF_REVISION_ARG) --local-dir $(DATA)/_dl >/dev/null && \
-	    cp $(DATA)/_dl/fixtures/lang/$$f.txt $(FIXTURES)/ ; } ; \
+	@for f in $(FIXTURE_CORPORA); do \
+	  [ -f $(FIXTURES)/$$f.txt ] || { echo "fetch $$f"; \
+	    $(HF) download $(CORPORA_REPO) fixtures/$$f.txt --repo-type dataset \
+	      $(CORPORA_REVISION_ARG) --local-dir $(DATA)/_dl >/dev/null && \
+	    cp $(DATA)/_dl/fixtures/$$f.txt $(FIXTURES)/ ; } ; \
 	done
-	@for f in $(FIXTURE_MODALITIES); do \
-	  [ -f $(FIXTURES)/$$f.txt ] || { echo "fetch modalities/$$f"; \
-	    $(HF) download $(HF_TEST_REPO) fixtures/modalities/$$f.txt --repo-type dataset \
+	@for f in $(FIXTURE_INTERNAL); do \
+	  n=$${f%%:*}; u=$${f##*:}; \
+	  [ -f $(FIXTURES)/$$n.txt ] || { echo "fetch $$n (internal)"; \
+	    $(HF) download $(HF_TEST_REPO) fixtures/modalities/$$u.txt --repo-type dataset \
 	      $(HF_REVISION_ARG) --local-dir $(DATA)/_dl >/dev/null && \
-	    cp $(DATA)/_dl/fixtures/modalities/$$f.txt $(FIXTURES)/ ; } ; \
+	    cp $(DATA)/_dl/fixtures/modalities/$$u.txt $(FIXTURES)/$$n.txt ; } ; \
 	done
 	@echo "fixtures ready: $$(ls $(FIXTURES) | wc -l | tr -d ' ') corpora"
 
@@ -98,9 +110,9 @@ decode:
 latency:
 	$(TOKBENCH) measure latency --engine all
 scaling:
-	$(TOKBENCH) measure scaling --engine all --corpus eng_Latn
+	$(TOKBENCH) measure scaling --engine all --corpus english
 memory:
-	$(TOKBENCH) measure memory --engine all --corpus eng_Latn
+	$(TOKBENCH) measure memory --engine all --corpus english
 
 .PHONY: test
 test:

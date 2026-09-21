@@ -18,7 +18,7 @@ def report(
     metadata = {
         "file_size_bytes": 100,
         "total_characters": 100,
-        "corpus": "eng_Latn",
+        "corpus": "english",
         "model": "gpt2",
         "reps": 5,
         "warmup": True,

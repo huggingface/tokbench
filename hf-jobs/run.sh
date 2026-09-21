@@ -4,6 +4,9 @@ set -Eeuo pipefail
 : "${TOKBENCH_INPUT_REVISION:?set TOKBENCH_INPUT_REVISION to an immutable commit SHA}"
 [[ "${TOKBENCH_INPUT_REVISION}" =~ ^[0-9a-fA-F]{40}$ ]] \
   || { echo "TOKBENCH_INPUT_REVISION must be a full 40-character commit SHA" >&2; exit 2; }
+: "${TOKBENCH_CORPORA_REVISION:?set TOKBENCH_CORPORA_REVISION to an immutable commit SHA}"
+[[ "${TOKBENCH_CORPORA_REVISION}" =~ ^[0-9a-fA-F]{40}$ ]] \
+  || { echo "TOKBENCH_CORPORA_REVISION must be a full 40-character commit SHA" >&2; exit 2; }
 
 output_mount="${TOKBENCH_OUTPUT_DIR:-/outputs}"
 job_name="${JOB_ID:-local-$(date -u +%Y%m%dT%H%M%SZ)}"
@@ -14,7 +17,7 @@ runs="${TOKBENCH_RUNS:-5}"
 reps="${TOKBENCH_REPS:-5}"
 features="${TOKBENCH_FEATURES:-rust-engines}"
 skip_build="${TOKBENCH_SKIP_BUILD:-0}"
-scaling_csv="${TOKBENCH_SCALING:-eng_Latn,cmn_Hani}"
+scaling_csv="${TOKBENCH_SCALING:-english,chinese}"
 models_csv="${TOKBENCH_MODELS:-}"
 engines_csv="${TOKBENCH_ENGINES:-}"
 measure="${TOKBENCH_MEASURE:-}"
@@ -87,9 +90,11 @@ split_csv "${latency_csv}" latency_items
 
 python3 hf-jobs/collect_environment.py "${output_dir}/environment-before.json"
 
-# The source dataset is private today, so HF_TOKEN is normally supplied as a
-# Job secret. The revision is mandatory because `main` is not reproducible.
-make_args=(HF_TEST_REVISION="${TOKBENCH_INPUT_REVISION}")
+# Models come from the private test repo, so HF_TOKEN is normally supplied as a
+# Job secret; the corpora are public. Both revisions are mandatory because
+# `main` is not reproducible.
+make_args=(HF_TEST_REVISION="${TOKBENCH_INPUT_REVISION}"
+           CORPORA_REVISION="${TOKBENCH_CORPORA_REVISION}")
 if [[ -n "${models_csv}" ]]; then
   make_args+=(BENCH_MODELS="${model_items[*]}")
 fi
