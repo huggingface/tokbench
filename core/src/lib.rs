@@ -238,7 +238,7 @@ pub trait Engine: Send {
     /// Encode a whole batch through the library's own batch entry point,
     /// appending every document's ids to `out`.
     ///
-    /// This is what an engine with an internal pool has to be called through --
+    /// This is what an engine with a native thread pool has to be called through --
     /// its `encode` is one document on one thread by construction, so timing
     /// that in a loop can never show what its pool does.
     ///
@@ -323,6 +323,26 @@ pub trait Build {
     where
         Self: Sized;
 
+    /// Build with an explicit cache capacity when the engine exposes one.
+    ///
+    /// `None` preserves the library's own default. Engines without a
+    /// configurable cache reject `Some` rather than silently ignoring a
+    /// benchmark parameter.
+    fn build_with_cache_capacity(
+        model: &Model,
+        cache_capacity: Option<usize>,
+    ) -> Result<Box<dyn Engine>, Unsupported>
+    where
+        Self: Sized,
+    {
+        match cache_capacity {
+            None => Self::build(model),
+            Some(_) => Err(Unsupported(
+                "this library exposes no configurable cache capacity".into(),
+            )),
+        }
+    }
+
     /// The same engine with the library's own caches turned off, when the
     /// library can be asked for that.
     ///
@@ -344,6 +364,25 @@ pub trait Build {
         Err(Unsupported(
             "this library exposes no way to disable its caches".into(),
         ))
+    }
+
+    /// Registry-compatible wrapper for a cache-disabled engine.
+    ///
+    /// An explicit capacity and a cache-free alias are contradictory, so the
+    /// default rejects that combination instead of choosing one silently.
+    fn build_without_cache_with_capacity(
+        model: &Model,
+        cache_capacity: Option<usize>,
+    ) -> Result<Box<dyn Engine>, Unsupported>
+    where
+        Self: Sized,
+    {
+        match cache_capacity {
+            None => Self::build_without_cache(model),
+            Some(_) => Err(Unsupported(
+                "an explicit cache capacity cannot be applied to a no-cache engine".into(),
+            )),
+        }
     }
 }
 
@@ -800,20 +839,33 @@ impl Padding {
 pub enum ScalingKind {
     /// One engine, told to use `n` threads, handed one batch. What a caller
     /// actually gets from the library's own batch API.
-    Internal,
+    NativeThreads,
     /// `n` independent single-thread engines fed by a shared cursor. What a
     /// caller gets by sharding requests, and the only curve obtainable from a
     /// library with no threading of its own.
-    External,
+    IndependentInstances,
 }
 
 impl ScalingKind {
     pub fn as_str(self) -> &'static str {
         match self {
-            ScalingKind::Internal => "internal",
-            ScalingKind::External => "external",
+            ScalingKind::NativeThreads => "native-threads",
+            ScalingKind::IndependentInstances => "independent-instances",
         }
     }
+}
+
+/// Which scaling strategy the caller requests.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ScalingMode {
+    /// Use native threads when the engine exposes them, otherwise independent
+    /// instances. This preserves tokbench's historical automatic selection.
+    #[default]
+    Auto,
+    /// One tokenizer instance using the library's own configurable pool.
+    NativeThreads,
+    /// One single-threaded tokenizer instance per harness thread.
+    IndependentInstances,
 }
 
 /// A scaling curve and, inseparably, the conditions it was obtained under.
@@ -850,11 +902,11 @@ impl Scaling {
 /// it is a different and wrong number: it leaves the engine's pool idle, or --
 /// worse, because it looks plausible -- starts `n` pools of `n` threads each
 /// and reports the resulting oversubscription as the engine's scaling. An
-/// engine that parallelises internally would also post >100% efficiency under
-/// external threading, having already used more than one core at "1 thread".
+/// engine that parallelises internally would also post >100% efficiency with
+/// independent instances, having already used more than one core at "1 thread".
 ///
 /// Only when `set_threads` returns false does the harness thread the engine
-/// itself, and the curve is then tagged [`ScalingKind::External`] so a reader
+/// itself, and the curve is then tagged [`ScalingKind::IndependentInstances`] so a reader
 /// can see it is the other question. Two choices in that fallback:
 ///
 /// * **Per-thread engines, not one shared engine.** Most such libraries are
@@ -880,8 +932,19 @@ pub fn measure_scaling(
     reps: usize,
     padding: Padding,
 ) -> Option<Scaling> {
+    measure_scaling_with_mode(make, chunks, counts, reps, padding, ScalingMode::Auto)
+}
+
+pub fn measure_scaling_with_mode(
+    make: &(dyn Fn() -> Option<Box<dyn Engine>> + Sync),
+    chunks: &[String],
+    counts: &[usize],
+    reps: usize,
+    padding: Padding,
+    mode: ScalingMode,
+) -> Option<Scaling> {
     if chunks.len() < 2 || reps == 0 {
-        return Some(Scaling::empty(ScalingKind::External, padding));
+        return Some(Scaling::empty(ScalingKind::IndependentInstances, padding));
     }
 
     // Spread warm-up throughout the input rather than taking a contiguous
@@ -930,21 +993,40 @@ pub fn measure_scaling(
         })
         .collect();
 
-    let (kind, usable) = if !settable.is_empty() {
-        (ScalingKind::Internal, settable)
-    } else if native_batch {
-        // Has its own batch fan-out but no width control. One point, at
-        // whatever width it picked; `threads: 0` records "the engine's own
-        // choice" rather than asserting a number the harness did not set.
-        (ScalingKind::Internal, vec![0])
-    } else {
-        (ScalingKind::External, counts.to_vec())
+    let can_pin_one = settable.contains(&1);
+    let (kind, usable, pin_instances) = match mode {
+        ScalingMode::Auto if !settable.is_empty() => (ScalingKind::NativeThreads, settable, false),
+        ScalingMode::Auto if native_batch => {
+            // Has its own batch fan-out but no width control. One point, at
+            // whatever width it picked; `threads: 0` records "the engine's own
+            // choice" rather than asserting a number the harness did not set.
+            (ScalingKind::NativeThreads, vec![0], false)
+        }
+        ScalingMode::Auto => (ScalingKind::IndependentInstances, counts.to_vec(), false),
+        ScalingMode::NativeThreads if !settable.is_empty() => {
+            (ScalingKind::NativeThreads, settable, false)
+        }
+        ScalingMode::NativeThreads if native_batch => (ScalingKind::NativeThreads, vec![0], false),
+        ScalingMode::NativeThreads => {
+            return Some(Scaling::empty(ScalingKind::NativeThreads, padding));
+        }
+        ScalingMode::IndependentInstances if native_batch && !can_pin_one => {
+            // A fixed-width native pool cannot be made single-threaded. Running
+            // several instances would oversubscribe the machine while claiming
+            // one thread per instance.
+            return Some(Scaling::empty(ScalingKind::IndependentInstances, padding));
+        }
+        ScalingMode::IndependentInstances => (
+            ScalingKind::IndependentInstances,
+            counts.to_vec(),
+            can_pin_one,
+        ),
     };
 
     // Padding is a property of a batch, so it only means anything where the
     // engine drives its own batch. An externally threaded engine is called one
     // document at a time, and there is no batch to pad to.
-    if kind == ScalingKind::External && padding != Padding::Off {
+    if kind == ScalingKind::IndependentInstances && padding != Padding::Off {
         return None;
     }
     if usable.is_empty() {
@@ -956,10 +1038,16 @@ pub fn measure_scaling(
         let mut samples = Vec::with_capacity(reps);
         for _ in 0..reps {
             let timed = match kind {
-                ScalingKind::Internal => {
-                    time_internal(make, &warm_chunks, &measured_chunks, n, padding)
+                ScalingKind::NativeThreads => {
+                    time_native_threads(make, &warm_chunks, &measured_chunks, n, padding)
                 }
-                ScalingKind::External => time_external(make, &warm_chunks, &measured_chunks, n),
+                ScalingKind::IndependentInstances => time_independent_instances(
+                    make,
+                    &warm_chunks,
+                    &measured_chunks,
+                    n,
+                    pin_instances,
+                ),
             };
             match timed {
                 Some(secs) => samples.push(secs),
@@ -1012,7 +1100,7 @@ pub fn measure_scaling(
 /// `None` when the engine will not take `threads`. That is a hard stop rather
 /// than a silent fallback: a refusal here would otherwise run on whatever
 /// thread count the engine felt like and report it as `threads`.
-fn time_internal(
+fn time_native_threads(
     make: &(dyn Fn() -> Option<Box<dyn Engine>> + Sync),
     warm: &[&str],
     measured: &[&str],
@@ -1044,11 +1132,12 @@ fn time_internal(
 
 /// One timed run of `threads` independent engines over a shared cursor, for
 /// libraries that have no threading of their own.
-fn time_external(
+fn time_independent_instances(
     make: &(dyn Fn() -> Option<Box<dyn Engine>> + Sync),
     warm: &[&str],
     measured: &[&str],
     threads: usize,
+    pin_single_thread: bool,
 ) -> Option<f64> {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Barrier;
@@ -1058,7 +1147,11 @@ fn time_external(
     // driver reports it separately.
     let mut engines: Vec<Box<dyn Engine>> = Vec::with_capacity(threads);
     for _ in 0..threads {
-        engines.push(make()?);
+        let mut engine = make()?;
+        if pin_single_thread && !engine.set_threads(1) {
+            return None;
+        }
+        engines.push(engine);
     }
     for engine in engines.iter_mut() {
         let mut buf: Ids = Vec::new();
@@ -1322,7 +1415,7 @@ mod tests {
         let scaling = measure_scaling(&make, &chunks, &counts, reps, Padding::Off).unwrap();
         assert_eq!(
             scaling.kind,
-            ScalingKind::External,
+            ScalingKind::IndependentInstances,
             "an engine that refuses set_threads has to be threaded by the harness"
         );
         let pts = scaling.points;
@@ -1379,7 +1472,7 @@ mod tests {
 
     /// An engine that owns its threading must be driven through its own batch
     /// entry point -- one instance, `set_threads`, one `encode_batch` -- and
-    /// never cloned per thread. This is the regression the external-only
+    /// never cloned per thread. This is the regression the independent-instance-only
     /// harness shipped: it reported the harness's scaling as the engine's.
     #[test]
     fn scaling_uses_the_engines_own_parallelism_when_it_has_any() {
@@ -1435,7 +1528,7 @@ mod tests {
             Some(Box::new(Pooled { threads: t.clone() }))
         };
 
-        // 1, 2, 8 rather than 1, 2, 4: internal mode builds
+        // 1, 2, 8 rather than 1, 2, 4: native-thread mode builds
         // `1 + 2 * counts.len()` engines, and with 1, 2, 4 that happens to
         // equal `1 + 2 + 4`, so the assertion below could not tell correct
         // behaviour from one-engine-per-thread.
@@ -1444,7 +1537,7 @@ mod tests {
 
         assert_eq!(
             scaling.kind,
-            ScalingKind::Internal,
+            ScalingKind::NativeThreads,
             "an engine answering set_threads must be measured through its own pool"
         );
         assert_eq!(scaling.points.len(), counts.len());
@@ -1461,11 +1554,29 @@ mod tests {
         assert_eq!(
             MADE.load(Ordering::Relaxed),
             1 + 2 * counts.len(),
-            "internal mode builds one engine per point, plus probes"
+            "native-thread mode builds one engine per point, plus probes"
         );
         // Two batch calls per point: one warm, one timed.
         assert_eq!(BATCHES.load(Ordering::Relaxed), counts.len() * 2);
         assert!((scaling.points[0].efficiency_pct - 100.0).abs() < 1e-6);
+
+        BATCHES.store(0, Ordering::Relaxed);
+        let independent = measure_scaling_with_mode(
+            &make,
+            &chunks,
+            &counts,
+            1,
+            Padding::Off,
+            ScalingMode::IndependentInstances,
+        )
+        .unwrap();
+        assert_eq!(independent.kind, ScalingKind::IndependentInstances,);
+        assert_eq!(independent.points.len(), counts.len());
+        assert_eq!(
+            BATCHES.load(Ordering::Relaxed),
+            0,
+            "independent instances must use the single-document entry point"
+        );
     }
 
     /// A library with its own batch fan-out but no width knob (tokie reads
@@ -1524,8 +1635,8 @@ mod tests {
 
         assert_eq!(
             scaling.kind,
-            ScalingKind::Internal,
-            "a native batch must be measured as internal, never threaded outside"
+            ScalingKind::NativeThreads,
+            "a native batch must use native threads, never unpinned independent instances"
         );
         // One point, and `threads: 0` for "the width the engine chose" rather
         // than a number the harness did not set.
@@ -1543,6 +1654,20 @@ mod tests {
             SINGLES.load(Ordering::Relaxed),
             0,
             "the harness must not fall back to per-document encode"
+        );
+
+        let independent = measure_scaling_with_mode(
+            &make,
+            &chunks,
+            &[1, 2, 4],
+            1,
+            Padding::Off,
+            ScalingMode::IndependentInstances,
+        )
+        .unwrap();
+        assert!(
+            independent.points.is_empty(),
+            "a fixed-width native pool cannot honestly run as single-threaded instances"
         );
     }
 

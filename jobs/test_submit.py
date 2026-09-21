@@ -25,6 +25,8 @@ def args(**overrides):
         "engines": None,
         "measure": None,
         "compare_to": None,
+        "cache_capacity": None,
+        "scaling_mode": "auto",
         "scaling": None,
         "max_threads": None,
         "no_decode": False,
@@ -47,10 +49,19 @@ class SubmitProfileTests(unittest.TestCase):
         self.assertEqual(config["no_decode"], "0")
         self.assertEqual(config["pin_physical_cores"], "1")
         self.assertEqual(config["latency"], "eng_Latn")
+        self.assertEqual(config["scaling_mode"], "auto")
 
     def test_blog_profile_rejects_matrix_overrides(self) -> None:
         with self.assertRaisesRegex(SystemExit, "fixes the measurement matrix"):
             resolve_benchmark(args(profile="blog-v1", models="gpt2"))
+        with self.assertRaisesRegex(SystemExit, "--cache-capacity"):
+            resolve_benchmark(args(profile="blog-v1", cache_capacity=8192))
+
+    def test_blog_profile_accepts_scaling_mode_axis(self) -> None:
+        config = resolve_benchmark(
+            args(profile="blog-v1", scaling_mode="independent-instances")
+        )
+        self.assertEqual(config["scaling_mode"], "independent-instances")
 
     def test_library_profile_is_encode_only_with_one_comparator(self) -> None:
         config = resolve_benchmark(args(profile="blog-v1-libraries"))
@@ -63,6 +74,23 @@ class SubmitProfileTests(unittest.TestCase):
         self.assertEqual(config["no_decode"], "1")
         self.assertEqual(config["max_threads"], "1")
         self.assertEqual(config["pin_physical_cores"], "0")
+
+    def test_library_profile_rejects_scaling_mode(self) -> None:
+        with self.assertRaisesRegex(SystemExit, "--scaling-mode"):
+            resolve_benchmark(
+                args(
+                    profile="blog-v1-libraries",
+                    scaling_mode="native-threads",
+                )
+            )
+
+    def test_default_profile_propagates_pipeline_cache_capacity(self) -> None:
+        config = resolve_benchmark(args(cache_capacity=0))
+        self.assertEqual(config["cache_capacity"], "0")
+
+    def test_default_profile_propagates_scaling_mode(self) -> None:
+        config = resolve_benchmark(args(scaling_mode="independent-instances"))
+        self.assertEqual(config["scaling_mode"], "independent-instances")
 
     def test_gigatoken_library_profile_adds_gigatoken(self) -> None:
         config = resolve_benchmark(args(profile="blog-v1-libraries-gigatoken"))

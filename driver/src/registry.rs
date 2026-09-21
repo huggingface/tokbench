@@ -7,7 +7,7 @@
 
 use tokbench_core::{Build, Engine, Model, Unsupported};
 
-pub type Ctor = fn(&Model) -> Result<Box<dyn Engine>, Unsupported>;
+pub type Ctor = fn(&Model, Option<usize>) -> Result<Box<dyn Engine>, Unsupported>;
 
 /// The correctness oracle. Every other engine's id stream is compared against
 /// this one; without it the run reports throughput but cannot verify it.
@@ -34,10 +34,10 @@ pub fn native() -> Vec<(&'static str, Ctor)> {
         ($v:ident, $feature:literal, $name:literal, $adapter:path) => {
             #[cfg(feature = $feature)]
             {
-                $v.push(($name, <$adapter>::build as Ctor));
+                $v.push(($name, <$adapter>::build_with_cache_capacity as Ctor));
                 $v.push((
                     concat!($name, "-no-cache"),
-                    <$adapter>::build_without_cache as Ctor,
+                    <$adapter>::build_without_cache_with_capacity as Ctor,
                 ));
             }
         };

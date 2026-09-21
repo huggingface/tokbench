@@ -69,9 +69,11 @@ python jobs/submit.py \
 `blog-v1` fixes the models, the `hf-tokenizers`, `pipeline`, and
 `pipeline-no-cache` engines, English/Chinese scaling corpora, and eight-thread
 ceiling. The third engine is the cache-disabled diagnostic used by Section 02.
-Use the default profile instead when overriding that matrix. A model selection
-controls both the downloaded artifacts and the driver filter, so a selected
-model cannot be silently absent from the Job.
+Run the profile once with `--scaling-mode native-threads` and once with
+`--scaling-mode independent-instances` when publishing both scaling views.
+Use the default profile instead when overriding the rest of that matrix. A
+model selection controls both the downloaded artifacts and the driver filter,
+so a selected model cannot be silently absent from the Job.
 
 The encode-only comparison against other Rust tokenizer libraries uses the
 same eight models and 22 corpora without running the other measurement
@@ -90,6 +92,17 @@ This runs `measure encode` for pipeline, kitoken, fastokens, tokie, tiktoken
 and wordchipper, all compared with one shared `hf-tokenizers` baseline.
 Add `--dry-run` to print the resolved, non-secret Job configuration without
 submitting or consuming compute.
+
+Scaling defaults to capability-based selection. Pass
+`--scaling-mode native-threads` to require the engine's own pool, or
+`--scaling-mode independent-instances` to run one single-threaded tokenizer
+instance per harness thread.
+
+For a cache-capacity experiment, use the default profile and pass, for example,
+`--measure encode --engines pipeline --cache-capacity 8192`. The value is
+forwarded to every repeated run and recorded in the report metadata. A value of
+`0` disables the pipeline BPE cache; omitting the option keeps the upstream
+65,536-entry default.
 
 Gigatoken requires a nightly Rust toolchain and a different lockfile because
 its upstream manifest uses nightly-only profile rustflags. Build a dedicated

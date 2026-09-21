@@ -25,6 +25,8 @@ pin_physical_cores="${TOKBENCH_PIN_PHYSICAL_CORES:-0}"
 latency_csv="${TOKBENCH_LATENCY:-}"
 latency_bytes="${TOKBENCH_LATENCY_BYTES:-512}"
 latency_samples="${TOKBENCH_LATENCY_SAMPLES:-1000}"
+cache_capacity="${TOKBENCH_CACHE_CAPACITY:-}"
+scaling_mode="${TOKBENCH_SCALING_MODE:-auto}"
 
 for numeric in "${runs}" "${reps}" "${max_threads}" "${latency_bytes}" "${latency_samples}"; do
   [[ "${numeric}" =~ ^[1-9][0-9]*$ ]] \
@@ -42,6 +44,10 @@ done
   || { echo "invalid TOKBENCH_COMPARE_TO: ${compare_to}" >&2; exit 2; }
 [[ -z "${compare_to}" || -n "${measure}" ]] \
   || { echo "TOKBENCH_COMPARE_TO requires TOKBENCH_MEASURE" >&2; exit 2; }
+[[ -z "${cache_capacity}" || "${cache_capacity}" =~ ^[0-9]+$ ]] \
+  || { echo "TOKBENCH_CACHE_CAPACITY must be zero or a positive integer" >&2; exit 2; }
+[[ "${scaling_mode}" =~ ^(auto|native-threads|independent-instances)$ ]] \
+  || { echo "invalid TOKBENCH_SCALING_MODE: ${scaling_mode}" >&2; exit 2; }
 
 # Scaling must not accidentally place two workers on sibling SMT threads.
 # Select one logical CPU for each distinct socket/core pair, restrict the whole
@@ -132,6 +138,8 @@ done
 for item in "${engine_items[@]}"; do
   [[ -n "${item}" ]] && args+=(--engine "${item}")
 done
+[[ -n "${cache_capacity}" ]] && args+=(--cache-capacity "${cache_capacity}")
+args+=(--scaling-mode "${scaling_mode}")
 
 # Each iteration is a new process and a complete paired scaling sweep. Keeping
 # every report lets downstream analysis compute efficiency within a sweep and

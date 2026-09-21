@@ -39,7 +39,8 @@ tokbench fixes the measurement, not the result:
    parallelise internally are flagged; a whole-machine number is never printed
    next to a single-core one unlabelled. In the scaling sweep the engine's own
    parallelism is used wherever it has any, and every curve says whether the
-   threads were the engine's (`internal`) or the harness's (`external`).
+   threads were the engine's (`native-threads`) or supplied as separate
+   tokenizer instances (`independent-instances`).
 6. **Disclose the extra work.** An engine that also computes byte offsets keeps
    that cost in its number, and the report says so next to it.
 7. **Decode gets the same ids, from the reference.** Decode is timed over the
@@ -70,11 +71,18 @@ cargo run --release -p tokbench --features rust-engines -- \
   measure latency --engine pipeline --model gpt2 --corpus eng_Latn
 cargo run --release -p tokbench --features rust-engines -- \
   measure scaling --engine pipeline --model gpt2 --corpus eng_Latn --max-threads 8
+cargo run --release -p tokbench --features rust-engines -- \
+  measure memory --engine all --corpus eng_Latn --threads 1 \
+  --scaling-mode independent-instances
+cargo run --release -p tokbench --features rust-engines -- \
+  measure memory --engine all --corpus eng_Latn --threads 8 \
+  --scaling-mode independent-instances
 ```
 
 Each command writes the normal tokbench JSON schema. It runs only the requested
-measurement family and skips phase breakdown, decode when it was not requested,
-and the separate memory pass. Interactive runs show one in-place progress bar
+measurement family and skips phase breakdown and decode when they were not
+requested. Memory is its own isolated child-process measurement and requires
+exactly one explicit corpus. Interactive runs show one in-place progress bar
 followed by a result table; redirected output omits the progress bar. The
 table keeps one row per model, collapsing multi-corpus runs to medians with a
 completion count. When several target engines are selected,
@@ -87,6 +95,18 @@ reports measured and comparable coverage separately. Every raw corpus
 result remains in the JSON. The existing command without `measure` continues
 to run the full benchmark.
 
+The tokenizers v1 pipeline BPE cache can be sized explicitly for an ablation:
+
+```bash
+tokbench measure encode --engine pipeline --cache-capacity 8192
+tokbench measure encode --engine pipeline --cache-capacity 0
+```
+
+Omitting `--cache-capacity` preserves tokenizers v1's upstream default of
+65,536 entries. The explicit value is stored as
+`dataset_metadata.pipeline_cache_capacity`; `0` disables the cache. Other
+engines are unchanged when they run in the same command.
+
 Scaling honors `--reps` and consumes the full corpus. Every repetition warms
 fresh engine instances on a representative input slice, then times each
 document in the disjoint remainder exactly once. Multi-corpus tables report
@@ -95,19 +115,21 @@ sweep, an untimed encode pass hashes each engine's token IDs against the
 reference, so a scaling-only report carries the same correctness gate as
 `measure encode`.
 
-**Whose threads.** The sweep drives each engine's own parallelism wherever the
-engine has any: it asks through `Engine::set_threads` and then calls the
-library's own batch entry point, `Engine::encode_batch`. Re-implementing
-parallelism outside an engine that already has a pool does not measure the
-engine at all -- it leaves that pool idle, or starts one pool per harness
-thread and reports the oversubscription as the engine's scaling. Every curve is
-therefore labelled:
+**Who supplies the threads.** `--scaling-mode auto` drives each engine's native
+threads when it exposes them and otherwise uses independent instances. Select
+one strategy explicitly with `--scaling-mode native-threads` or
+`--scaling-mode independent-instances`. Every curve is labelled:
 
 | label | meaning |
 | --- | --- |
-| `internal` | one engine, told to use *n* threads, handed one batch. What a batch caller gets. |
-| `internal`, `n/a @ 0T` | the library fans out but exposes no width knob, so one point at the width it chose. Not a curve: there is no 1-thread baseline, and none is invented. |
-| `external` | the library has no threading of its own, so the harness ran one instance per thread over a shared cursor. A different question -- *n* independent encoders -- and only ever reported under this label. |
+| `native-threads` | one engine, told to use *n* threads, handed one batch. What a batch caller gets. |
+| `native-threads`, `n/a @ 0T` | the library fans out but exposes no width knob, so one point at the width it chose. Not a curve: there is no 1-thread baseline, and none is invented. |
+| `independent-instances` | *n* single-threaded tokenizer instances in one process, fed by a shared cursor. |
+
+An engine with a fixed-width native pool cannot run in
+`independent-instances` mode because tokbench cannot guarantee that each
+instance is single-threaded. It reports no curve rather than oversubscribing
+the machine under the wrong label.
 
 **Padding is an axis, not a footnote.** `--padding off|longest|both` (both by
 default) measures each engine ragged and padded to the batch's longest member.
@@ -197,9 +219,12 @@ Two different questions, both reported, neither a substitute for the other:
   PyPI wheel, npm unpacked). From `scripts/package_size.py`.
 - **`binary_delta_kb`** — stripped bytes added to a minimal program over a
   no-engine baseline. From `scripts/binsize.sh`.
-- **`rss_delta_mb`** — resident memory once loaded and warmed, measured in a
-  **dedicated child process per engine**. In one process the allocator hands
-  engine B the pages engine A freed, reporting B's footprint as ~0.
+- **`heap_load_mb`** — live heap held after loading the tokenizer.
+- **`heap_encode_mb`** — live heap after encoding the selected corpus, including
+  populated caches and worker state. Both heap values are measured in a
+  **dedicated child process per engine**. `memory_threads` and
+  `memory_parallelism` record whether the result used one native pool or
+  multiple independent tokenizer instances.
 
 ## Output
 

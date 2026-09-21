@@ -63,7 +63,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--timeout", default="6h")
     parser.add_argument("--runs", type=int, default=5)
     parser.add_argument("--reps", type=int, default=5)
+    parser.add_argument(
+        "--cache-capacity",
+        type=int,
+        help=("Override the tokenizers v1 pipeline BPE word-cache capacity; "
+              "0 disables it, omission keeps the upstream default"),
+    )
     parser.add_argument("--max-threads", type=int)
+    parser.add_argument(
+        "--scaling-mode",
+        choices=("auto", "native-threads", "independent-instances"),
+        default="auto",
+        help="Select the scaling worker model",
+    )
     parser.add_argument("--scaling", help="Comma-separated scaling corpora")
     parser.add_argument("--models", help="Comma-separated model allowlist")
     parser.add_argument("--engines", help="Comma-separated engine allowlist")
@@ -116,6 +128,13 @@ def resolve_benchmark(args: argparse.Namespace) -> dict[str, str]:
                 ("--latency", args.latency),
                 ("--measure", args.measure),
                 ("--compare-to", args.compare_to),
+                ("--cache-capacity", args.cache_capacity),
+                (
+                    "--scaling-mode",
+                    None
+                    if args.profile == "blog-v1" or args.scaling_mode == "auto"
+                    else args.scaling_mode,
+                ),
             )
             if value is not None
         ]
@@ -148,6 +167,8 @@ def resolve_benchmark(args: argparse.Namespace) -> dict[str, str]:
                 "no_decode": "1",
                 "pin_physical_cores": "0",
                 "latency": "",
+                "cache_capacity": "",
+                "scaling_mode": "auto",
             }
         return {
             "models": ",".join(BLOG_V1_MODELS),
@@ -159,6 +180,8 @@ def resolve_benchmark(args: argparse.Namespace) -> dict[str, str]:
             "no_decode": "0",
             "pin_physical_cores": "1",
             "latency": BLOG_V1_LATENCY,
+            "cache_capacity": "",
+            "scaling_mode": args.scaling_mode,
         }
 
     max_threads = args.max_threads if args.max_threads is not None else 8
@@ -172,6 +195,10 @@ def resolve_benchmark(args: argparse.Namespace) -> dict[str, str]:
         "no_decode": "1" if args.no_decode else "0",
         "pin_physical_cores": "1" if args.pin_physical_cores else "0",
         "latency": args.latency or "",
+        "cache_capacity": (
+            "" if args.cache_capacity is None else str(args.cache_capacity)
+        ),
+        "scaling_mode": args.scaling_mode,
     }
 
 
@@ -184,6 +211,8 @@ def main() -> None:
             "--runs, --reps, --max-threads, --latency-bytes and "
             "--latency-samples must be positive"
         )
+    if args.cache_capacity is not None and args.cache_capacity < 0:
+        raise SystemExit("--cache-capacity must be zero or a positive integer")
     if not args.allow_mutable_image and "@sha256:" not in args.image:
         raise SystemExit(
             "--image must use an immutable @sha256: digest "
@@ -212,6 +241,8 @@ def main() -> None:
         "TOKBENCH_LATENCY": benchmark["latency"],
         "TOKBENCH_LATENCY_BYTES": str(args.latency_bytes),
         "TOKBENCH_LATENCY_SAMPLES": str(args.latency_samples),
+        "TOKBENCH_CACHE_CAPACITY": benchmark["cache_capacity"],
+        "TOKBENCH_SCALING_MODE": benchmark["scaling_mode"],
     }
     if args.dry_run:
         print(

@@ -1,5 +1,5 @@
 //! The HuggingFace **rc0 pipeline** — `tk-encode` + `tk-serialize` from
-//! [`tokenizers-rc0`](https://github.com/huggingface/tokenizers/tree/5c3727a93bd64cd9caf0e229c637fc71f2cd2fce),
+//! [`tokenizers-rc0`](https://github.com/huggingface/tokenizers/tree/199d9a1338b1ffe672549f4dd80be49af13fab92),
 //! the 1.0.0-rc.0 line.
 //!
 //! This is the interesting row in the table: it is the same project as the
@@ -75,7 +75,7 @@ pub struct Adapter {
     /// Reused across calls, so the timed loop never grows it — the same
     /// buffer-reuse a real encode loop does, and what `encode_into` is for.
     scratch: Vec<PipelineToken>,
-    cache_enabled: bool,
+    name: &'static str,
     /// Rebuilt by `set_padding`, so the padded and unpadded cells differ by
     /// exactly this and nothing else.
     options: EncodeOptions,
@@ -84,7 +84,11 @@ pub struct Adapter {
     threads: usize,
 }
 
-fn build(model: &Model, cache_enabled: bool) -> Result<Box<dyn Engine>, Unsupported> {
+fn build(
+    model: &Model,
+    cache_capacity: Option<usize>,
+    name: &'static str,
+) -> Result<Box<dyn Engine>, Unsupported> {
     let path = model.tokenizer_json();
     if !path.exists() {
         return Err(Unsupported("no tokenizer.json".into()));
@@ -95,25 +99,33 @@ fn build(model: &Model, cache_enabled: bool) -> Result<Box<dyn Engine>, Unsuppor
     // timed region — the same thing upstream's own benches do.
     let canonical = tk_convert::canonicalize_file(&path)
         .map_err(|e| Unsupported(format!("tk-convert cannot upgrade this config: {e}")))?;
-    let canonical = if cache_enabled {
-        canonical
-    } else {
+    let canonical = if let Some(cache_capacity) = cache_capacity {
         let mut value: serde_json::Value = serde_json::from_str(&canonical)
             .map_err(|e| Unsupported(format!("cannot parse canonical config: {e}")))?;
         let model = value
             .get_mut("model")
             .and_then(serde_json::Value::as_object_mut)
             .ok_or_else(|| Unsupported("canonical config has no model object".into()))?;
-        model.insert("cache_capacity".into(), serde_json::Value::from(0));
+        if model.get("type").and_then(serde_json::Value::as_str) != Some("BPE") {
+            return Err(Unsupported(
+                "cache capacity is configurable only for the pipeline BPE model".into(),
+            ));
+        }
+        model.insert(
+            "cache_capacity".into(),
+            serde_json::Value::from(cache_capacity),
+        );
         serde_json::to_string(&value)
-            .map_err(|e| Unsupported(format!("cannot write no-cache config: {e}")))?
+            .map_err(|e| Unsupported(format!("cannot write cache config: {e}")))?
+    } else {
+        canonical
     };
     let tok = tk_serialize::from_json(&canonical)
         .map_err(|e| Unsupported(format!("tk-serialize cannot read this config: {e}")))?;
     Ok(Box::new(Adapter {
         tok,
         scratch: Vec::new(),
-        cache_enabled,
+        name,
         options: EncodeOptions {
             add_special_tokens: false,
             padding: Override::Off,
@@ -124,7 +136,14 @@ fn build(model: &Model, cache_enabled: bool) -> Result<Box<dyn Engine>, Unsuppor
 
 impl Build for Adapter {
     fn build(model: &Model) -> Result<Box<dyn Engine>, Unsupported> {
-        build(model, true)
+        build(model, None, "pipeline")
+    }
+
+    fn build_with_cache_capacity(
+        model: &Model,
+        cache_capacity: Option<usize>,
+    ) -> Result<Box<dyn Engine>, Unsupported> {
+        build(model, cache_capacity, "pipeline")
     }
 
     /// `cache_capacity: 0` in the canonical config, which the reader now
@@ -139,23 +158,19 @@ impl Build for Adapter {
     /// Measured contribution once it did work (gpt2, 14 MB of deduplicated
     /// English, one thread): 172 MB/s with no cache against 260 with it.
     fn build_without_cache(model: &Model) -> Result<Box<dyn Engine>, Unsupported> {
-        build(model, false)
+        build(model, Some(0), "pipeline-no-cache")
     }
 }
 
 impl Engine for Adapter {
     fn info(&self) -> Info {
         Info {
-            name: if self.cache_enabled {
-                "pipeline"
-            } else {
-                "pipeline-no-cache"
-            },
+            name: self.name,
             // Not a release: a pinned rev on the rc0 branch. See Cargo.toml.
-            version: "tk-encode 1.0.0-rc.0 (tokenizers-rc0 @ 5c3727a9)",
+            version: "tk-encode 1.0.0-rc.0 (tokenizers-rc0 @ 199d9a13)",
             lang: "rust",
             class: Class::Native,
-            url: "https://github.com/huggingface/tokenizers/tree/5c3727a93bd64cd9caf0e229c637fc71f2cd2fce",
+            url: "https://github.com/huggingface/tokenizers/tree/199d9a1338b1ffe672549f4dd80be49af13fab92",
             also_computes: "",
             // Reported, not declared: true exactly when this instance was
             // told to use more than one thread.

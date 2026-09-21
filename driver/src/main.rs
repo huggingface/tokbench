@@ -26,7 +26,10 @@ use std::time::Instant;
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use serde::{Deserialize, Serialize};
-use tokbench_core::{chunk, measure, measure_decode, measure_latency, Ids, Model, Phases};
+use tokbench_core::{
+    chunk, measure, measure_decode, measure_latency, measure_scaling_with_mode, Ids, Model, Phases,
+    ScalingMode,
+};
 
 /// ~10 kB documents: large enough that per-call overhead is amortised, small
 /// enough to stay in cache. Matches the upstream pipeline benchmark so numbers
@@ -44,6 +47,8 @@ enum MeasureCommand {
     Latency,
     /// Multi-thread encode throughput and efficiency.
     Scaling,
+    /// Live heap held by a loaded and warmed tokenizer.
+    Memory,
 }
 
 #[derive(Subcommand, Debug)]
@@ -80,6 +85,11 @@ struct Args {
     /// Skip the warm-up pass to report cold-cache numbers instead.
     #[arg(long, global = true)]
     no_warmup: bool,
+
+    /// Override the tokenizers v1 pipeline BPE word-cache capacity.
+    /// `0` disables the cache; omission preserves the upstream default (65,536).
+    #[arg(long, global = true)]
+    cache_capacity: Option<usize>,
 
     /// Only run these engines (repeatable). Use `all`, or omit, for everything
     /// compiled in that supports the selected measurement.
@@ -149,10 +159,26 @@ struct Args {
     #[arg(long, global = true)]
     max_threads: Option<NonZeroUsize>,
 
+    /// Worker count for `measure memory`. At one worker this measures one
+    /// tokenizer. At larger counts the selected scaling mode decides whether
+    /// that is one native pool or several independent tokenizer instances.
+    #[arg(long, default_value_t = NonZeroUsize::new(1).unwrap(), global = true)]
+    threads: NonZeroUsize,
+
     /// Measure scaling points from the highest thread count down to one.
     /// Jobs alternate this with the default order to expose temporal drift.
     #[arg(long, global = true)]
     reverse_scaling: bool,
+
+    /// How scaling workers are supplied: the engine's native thread pool,
+    /// independent single-threaded instances, or automatic capability-based selection.
+    #[arg(
+        long,
+        value_parser = ["auto", "native-threads", "independent-instances"],
+        default_value = "auto",
+        global = true
+    )]
+    scaling_mode: String,
 
     /// Which padding modes the scaling sweep measures: `off`, `longest`, or
     /// `both`.
@@ -187,6 +213,8 @@ struct Args {
     memory_model: Option<PathBuf>,
     #[arg(long, hide = true)]
     memory_corpus: Option<PathBuf>,
+    #[arg(long, hide = true)]
+    memory_threads: Option<NonZeroUsize>,
 }
 
 // ---------------------------------------------------------------------------
@@ -203,6 +231,10 @@ struct DatasetMetadata {
     model: String,
     reps: usize,
     warmup: bool,
+    /// Explicit tokenizers v1 pipeline cache capacity. Absent means the
+    /// upstream default recorded by the pinned engine revision.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pipeline_cache_capacity: Option<usize>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
@@ -279,6 +311,11 @@ struct EngineResult {
     /// caches it fills. The gap to `heap_load_mb` is the cache.
     #[serde(skip_serializing_if = "Option::is_none")]
     heap_encode_mb: Option<f64>,
+    /// Worker configuration used for the footprint measurement.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    memory_threads: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    memory_parallelism: Option<String>,
     /// Published size of the engine's own package — the `.crate` tarball, the
     /// PyPI wheel, or the npm unpacked size. This is the dependency you take
     /// on. From `scripts/package_size.py`.
@@ -354,9 +391,9 @@ struct ScalePoint {
     /// `"off"` or `"longest"`. Points from different padding modes are NOT
     /// comparable and must never be mixed in one curve.
     padding: String,
-    /// `"internal"` (the engine's own pool, via its batch API) or `"external"`
-    /// (one engine instance per thread, because the library exposes no
-    /// threading of its own).
+    /// `"native-threads"` (the engine's own pool, via its batch API) or
+    /// `"independent-instances"` (one single-threaded engine instance per
+    /// harness thread).
     parallelism: String,
 }
 
@@ -592,6 +629,9 @@ fn print_collapsed_measurement_table(
                 format!("median scaling [pad {padding}]"),
             ]
         })),
+        MeasureCommand::Memory => {
+            headers.extend(["median loaded MB", "median working MB", "workers"].map(str::to_string))
+        }
     }
     if let Some(comparator) = compare_to {
         match measurement {
@@ -604,6 +644,10 @@ fn print_collapsed_measurement_table(
                     headers.push(format!("1T vs {comparator} [pad {padding}]"));
                     headers.push(format!("max vs {comparator} [pad {padding}]"));
                 }
+            }
+            MeasureCommand::Memory => {
+                headers.push(format!("loaded heap vs {comparator}"));
+                headers.push(format!("working heap vs {comparator}"));
             }
             _ => headers.push(format!("vs {comparator}")),
         }
@@ -843,6 +887,53 @@ fn print_collapsed_measurement_table(
                     }
                 }
             }
+            MeasureCommand::Memory => {
+                let complete: Vec<_> = entries
+                    .iter()
+                    .filter(|(result, _)| result.heap_encode_mb.is_some())
+                    .collect();
+                row.push(format!("{}/{} measured", complete.len(), expected));
+                row.push(fmt(
+                    median(
+                        complete
+                            .iter()
+                            .filter_map(|(r, _)| r.heap_load_mb)
+                            .collect(),
+                    ),
+                    1,
+                ));
+                row.push(fmt(
+                    median(
+                        complete
+                            .iter()
+                            .filter_map(|(r, _)| r.heap_encode_mb)
+                            .collect(),
+                    ),
+                    1,
+                ));
+                let workers = complete
+                    .first()
+                    .and_then(|(r, _)| r.memory_threads)
+                    .map_or_else(|| "-".into(), |n| n.to_string());
+                row.push(workers);
+                if compare_to.is_some() {
+                    for loaded in [true, false] {
+                        let ratios = complete
+                            .iter()
+                            .filter_map(|(result, comparator)| {
+                                let comparator = comparator.as_ref()?;
+                                let (target, baseline) = if loaded {
+                                    (result.heap_load_mb?, comparator.heap_load_mb?)
+                                } else {
+                                    (result.heap_encode_mb?, comparator.heap_encode_mb?)
+                                };
+                                (baseline > 0.0).then_some(target / baseline)
+                            })
+                            .collect();
+                        row.push(median_multiplier(ratios, expected));
+                    }
+                }
+            }
         }
         rows.push(row);
     }
@@ -1015,6 +1106,8 @@ fn print_measurement_table(runs: &[Run], measurement: MeasureCommand, compare_to
                 format!("scaling [pad {padding}]"),
             ]
         })),
+        MeasureCommand::Memory => headers
+            .extend(["loaded MB", "working MB", "workers", "parallelism"].map(str::to_string)),
     }
     if let Some(comparator) = compare_to {
         match measurement {
@@ -1027,6 +1120,10 @@ fn print_measurement_table(runs: &[Run], measurement: MeasureCommand, compare_to
                     headers.push(format!("1T vs {comparator} [pad {padding}]"));
                     headers.push(format!("max vs {comparator} [pad {padding}]"));
                 }
+            }
+            MeasureCommand::Memory => {
+                headers.push(format!("loaded heap vs {comparator}"));
+                headers.push(format!("working heap vs {comparator}"));
             }
             _ => headers.push(format!("vs {comparator}")),
         }
@@ -1264,6 +1361,52 @@ fn print_measurement_table(runs: &[Run], measurement: MeasureCommand, compare_to
                         });
                     }
                 }
+                MeasureCommand::Memory => {
+                    row.push(
+                        result
+                            .heap_load_mb
+                            .map_or_else(|| "-".into(), |v| format!("{v:.1}")),
+                    );
+                    row.push(
+                        result
+                            .heap_encode_mb
+                            .map_or_else(|| "-".into(), |v| format!("{v:.1}")),
+                    );
+                    row.push(
+                        result
+                            .memory_threads
+                            .map_or_else(|| "-".into(), |v| v.to_string()),
+                    );
+                    row.push(
+                        result
+                            .memory_parallelism
+                            .clone()
+                            .unwrap_or_else(|| "-".into()),
+                    );
+                    if compare_to.is_some() {
+                        for loaded in [true, false] {
+                            let pair = comparator.map(|other| {
+                                if loaded {
+                                    (result.heap_load_mb, other.heap_load_mb)
+                                } else {
+                                    (result.heap_encode_mb, other.heap_encode_mb)
+                                }
+                            });
+                            row.push(match (unsupported, pair) {
+                                (Some(why), _) => format!("unsupported: {why}"),
+                                (None, Some((Some(target), Some(baseline)))) if baseline > 0.0 => {
+                                    multiplier(target, baseline)
+                                }
+                                (None, _) => "comparator unsupported".into(),
+                            });
+                        }
+                    } else {
+                        row.push(
+                            unsupported
+                                .map_or_else(|| "ok".into(), |why| format!("unsupported: {why}")),
+                        );
+                    }
+                }
             }
             rows.push(row);
         }
@@ -1292,7 +1435,11 @@ fn main() -> Result<()> {
     };
     let run_latency = measurement == Some(MeasureCommand::Latency);
     let run_scaling = measurement == Some(MeasureCommand::Scaling);
-    let run_memory = measurement.is_none() && !args.no_memory;
+    let run_memory_atomic = measurement == Some(MeasureCommand::Memory);
+    let run_memory = run_memory_atomic || (measurement.is_none() && !args.no_memory);
+    if !run_memory_atomic && args.threads.get() != 1 {
+        bail!("--threads is available with `tokbench measure memory` only");
+    }
 
     // Child mode short-circuits everything: this process exists to load one
     // engine and report its memory, so it must not touch any other.
@@ -1349,6 +1496,9 @@ fn main() -> Result<()> {
             args.corpora.display()
         );
     }
+    if run_memory_atomic && (args.corpus.len() != 1 || corpora.len() != 1) {
+        bail!("`tokbench measure memory` requires exactly one explicit --corpus");
+    }
 
     let natives = registry::native();
     let scripted = registry::scripted();
@@ -1391,7 +1541,7 @@ fn main() -> Result<()> {
             .chain(args.compare_to.iter())
             .any(|requested| scripted.iter().any(|(name, _)| requested == name))
     {
-        bail!("decode, latency, and scaling measurements currently support native engines only");
+        bail!("decode, latency, scaling, and memory measurements currently support native engines only");
     }
     if run_decode && !natives.iter().any(|(name, _)| *name == registry::REFERENCE) {
         bail!(
@@ -1411,6 +1561,11 @@ fn main() -> Result<()> {
         "longest" => vec![tokbench_core::Padding::Longest],
         _ => vec![tokbench_core::Padding::Off, tokbench_core::Padding::Longest],
     };
+    let scaling_mode = match args.scaling_mode.as_str() {
+        "native-threads" => ScalingMode::NativeThreads,
+        "independent-instances" => ScalingMode::IndependentInstances,
+        _ => ScalingMode::Auto,
+    };
     if !args.scaling.is_empty() {
         eprintln!(
             "scaling sweep on {:?} at thread counts {:?}, padding {:?}",
@@ -1428,6 +1583,14 @@ fn main() -> Result<()> {
             || args.engine.iter().any(|engine| engine == n)
             || args.compare_to.as_deref() == Some(n)
     };
+    if args.cache_capacity.is_some() {
+        if !known_engines.contains(&"pipeline") {
+            bail!("--cache-capacity requires the pipeline engine feature");
+        }
+        if !want("pipeline") {
+            bail!("--cache-capacity requires selecting the pipeline engine");
+        }
+    }
     let native_count = natives.iter().filter(|(name, _)| want(name)).count();
     let scripted_count = if run_encode {
         scripted.iter().filter(|(name, _)| want(name)).count()
@@ -1446,6 +1609,10 @@ fn main() -> Result<()> {
         Some(MeasureCommand::Scaling) => {
             format!("thread counts {thread_sweep:?}, {} reps", args.reps)
         }
+        Some(MeasureCommand::Memory) => format!(
+            "{} worker(s), {} parallelism, median of {} isolated runs",
+            args.threads, args.scaling_mode, args.reps
+        ),
         _ => format!("{} reps each", args.reps),
     };
     if let Some(measurement) = measurement {
@@ -1454,6 +1621,7 @@ fn main() -> Result<()> {
             MeasureCommand::Decode => "decode",
             MeasureCommand::Latency => "latency",
             MeasureCommand::Scaling => "scaling",
+            MeasureCommand::Memory => "memory",
         };
         eprintln!(
             "tokbench measure {name}: {} engine(s) × {} model(s) × {} corpus/corpora, {}",
@@ -1535,7 +1703,7 @@ fn main() -> Result<()> {
                 natives
                     .iter()
                     .find(|(n, _)| *n == registry::REFERENCE)
-                    .and_then(|(_, ctor)| ctor(&model).ok())
+                    .and_then(|(_, ctor)| ctor(&model, None).ok())
                     .map(|mut r| {
                         chunks
                             .iter()
@@ -1554,14 +1722,28 @@ fn main() -> Result<()> {
                 if !want(name) {
                     continue;
                 }
+                // The dedicated footprint child supplies both metadata and
+                // measurements. Avoid loading every model once here only to
+                // load it again in the isolated process below.
+                if run_memory_atomic {
+                    results.push(EngineResult {
+                        tokenizer_name: name.to_string(),
+                        ..Default::default()
+                    });
+                    continue;
+                }
                 let t0 = Instant::now();
+                let engine_cache_capacity = (*name == "pipeline")
+                    .then_some(args.cache_capacity)
+                    .flatten();
                 // Third-party code, adversarial inputs. A panic here is a
                 // finding about that engine, not a reason to lose the run.
-                let built =
-                    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| ctor(&model))) {
-                        Ok(r) => r,
-                        Err(_) => Err(tokbench_core::Unsupported("panicked while loading".into())),
-                    };
+                let built = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    ctor(&model, engine_cache_capacity)
+                })) {
+                    Ok(r) => r,
+                    Err(_) => Err(tokbench_core::Unsupported("panicked while loading".into())),
+                };
                 let load_ms = t0.elapsed().as_secs_f64() * 1e3;
 
                 match built {
@@ -1672,13 +1854,14 @@ fn main() -> Result<()> {
                             let mut points: Vec<ScalePoint> = Vec::new();
                             let mut missing: Vec<String> = Vec::new();
                             for &padding in &padding_modes {
-                                let make = || ctor(&model).ok();
-                                let curve = tokbench_core::measure_scaling(
+                                let make = || ctor(&model, engine_cache_capacity).ok();
+                                let curve = measure_scaling_with_mode(
                                     &make,
                                     scaling_chunks,
                                     &thread_sweep,
                                     args.reps,
                                     padding,
+                                    scaling_mode,
                                 );
                                 let Some(curve) = curve else {
                                     // No native support for this padding mode.
@@ -1921,6 +2104,7 @@ fn main() -> Result<()> {
                     model: model_name.clone(),
                     reps: args.reps,
                     warmup: !args.no_warmup,
+                    pipeline_cache_capacity: args.cache_capacity,
                 },
                 results,
             });
@@ -1958,9 +2142,50 @@ fn main() -> Result<()> {
         );
         for (i, (run, (model, corpus))) in runs.iter_mut().zip(&cell_inputs).enumerate() {
             for r in run.results.iter_mut().filter(|r| r.unsupported.is_none()) {
-                if let Some(m) = measure_memory(&r.tokenizer_name, model, corpus) {
+                let cache_capacity = (r.tokenizer_name == "pipeline")
+                    .then_some(args.cache_capacity)
+                    .flatten();
+                let threads = if run_memory_atomic {
+                    args.threads.get()
+                } else {
+                    1
+                };
+                let mode = if run_memory_atomic {
+                    args.scaling_mode.as_str()
+                } else {
+                    "independent-instances"
+                };
+                if let Some(m) = measure_memory_repeated(
+                    &r.tokenizer_name,
+                    model,
+                    corpus,
+                    cache_capacity,
+                    threads,
+                    mode,
+                    if run_memory_atomic { args.reps } else { 1 },
+                ) {
                     r.heap_load_mb = m.heap_load_mb;
                     r.heap_encode_mb = m.heap_encode_mb;
+                    r.memory_threads = m.memory_threads;
+                    r.memory_parallelism = m.memory_parallelism;
+                    if let Some(value) = m.engine_version {
+                        r.engine_version = value;
+                    }
+                    if let Some(value) = m.engine_lang {
+                        r.engine_lang = value;
+                    }
+                    if let Some(value) = m.engine_class {
+                        r.engine_class = value;
+                    }
+                    if let Some(value) = m.also_computes {
+                        r.also_computes = value;
+                    }
+                    if let Some(value) = m.internally_parallel {
+                        r.internally_parallel = value;
+                    }
+                    if m.unsupported.is_some() {
+                        r.unsupported = m.unsupported;
+                    }
                 }
             }
             if (i + 1) % 10 == 0 {
@@ -2134,25 +2359,108 @@ fn memory_child(args: &Args, name: &str) -> Result<()> {
 
     let text = tokbench_core::read_corpus(&corpus).context("reading corpus")?;
     let chunks = chunk(&text, CHUNK_BYTES, MAX_CHUNKS);
-
+    let threads = args.memory_threads.map_or(1, NonZeroUsize::get);
     let base = tokbench_core::mem::live_heap();
-    let Some(mut engine) = ctor(&model).ok() else {
-        println!("{{}}");
+    let cache_capacity = (name == "pipeline")
+        .then_some(args.cache_capacity)
+        .flatten();
+    let build = || ctor(&model, cache_capacity).ok();
+    let Some(mut first) = build() else {
+        println!(
+            "{}",
+            serde_json::json!({"unsupported": "could not load engine"})
+        );
         return Ok(());
     };
-    // Two samples, because "how much RAM does this engine use" is two questions:
-    // what the loaded tokenizer holds, and what it holds once its caches are
-    // warm. An engine can win one and lose the other.
-    let after_load = tokbench_core::mem::live_heap();
-    let mut out = Vec::new();
-    for c in &chunks {
-        out.clear();
-        engine.encode(c, &mut out);
+    let info = first.info();
+    let native = match args.scaling_mode.as_str() {
+        "native-threads" => first.set_threads(threads),
+        "independent-instances" => false,
+        _ => first.set_threads(threads),
+    };
+    if args.scaling_mode == "native-threads" && !native {
+        println!(
+            "{}",
+            serde_json::json!({"unsupported": format!("engine cannot run with {threads} native threads")})
+        );
+        return Ok(());
     }
-    // The corpus is resident before the baseline is taken and `out` holds only
-    // one chunk's ids, so neither is charged to the engine.
-    let after_encode = tokbench_core::mem::live_heap();
-    drop(out);
+    let parallelism = if native {
+        "native-threads"
+    } else {
+        "independent-instances"
+    };
+
+    // Two samples answer two different questions: the retained tokenizer
+    // structures, and the state retained while the configured workers are
+    // warm. Independent mode keeps every tokenizer alive at both snapshots.
+    if !native && first.has_native_batch() && !first.set_threads(1) {
+        println!(
+            "{}",
+            serde_json::json!({
+                "unsupported": "engine has a native batch pool that cannot be pinned to one thread"
+            })
+        );
+        return Ok(());
+    }
+    let mut engines = vec![first];
+    if !native {
+        while engines.len() < threads {
+            let Some(mut engine) = build() else {
+                println!(
+                    "{}",
+                    serde_json::json!({"unsupported": "could not load every worker instance"})
+                );
+                return Ok(());
+            };
+            // Prevent an engine's own pool from multiplying the requested
+            // independent worker count whenever it exposes a width control.
+            engine.set_threads(1);
+            engines.push(engine);
+        }
+    }
+    let after_load = tokbench_core::mem::live_heap();
+
+    let after_encode = if native {
+        let refs: Vec<&str> = chunks.iter().map(String::as_str).collect();
+        let mut out = Vec::new();
+        engines[0].encode_batch(&refs, &mut out);
+        drop(out);
+        tokbench_core::mem::live_heap()
+    } else {
+        use std::sync::{Arc, Barrier};
+        let done = Arc::new(Barrier::new(threads + 1));
+        let release = Arc::new(Barrier::new(threads + 1));
+        let sample = std::thread::scope(|scope| {
+            let mut handles = Vec::with_capacity(threads);
+            for (worker, mut engine) in engines.drain(..).enumerate() {
+                let done = Arc::clone(&done);
+                let release = Arc::clone(&release);
+                let chunks = &chunks;
+                handles.push(scope.spawn(move || {
+                    let mut out = Vec::new();
+                    for text in chunks.iter().skip(worker).step_by(threads) {
+                        out.clear();
+                        engine.encode(text, &mut out);
+                    }
+                    drop(out);
+                    done.wait();
+                    release.wait();
+                    engine
+                }));
+            }
+            done.wait();
+            let sample = tokbench_core::mem::live_heap();
+            release.wait();
+            for handle in handles {
+                if let Ok(engine) = handle.join() {
+                    engines.push(engine);
+                }
+            }
+            sample
+        });
+        sample
+    };
 
     let grew = |a: Option<u64>| match (base, a) {
         (Some(b), Some(a)) => Some(a.saturating_sub(b) as f64 / (1024.0 * 1024.0)),
@@ -2163,11 +2471,18 @@ fn memory_child(args: &Args, name: &str) -> Result<()> {
         serde_json::json!({
             "heap_load_mb": grew(after_load),
             "heap_encode_mb": grew(after_encode),
+            "memory_threads": threads,
+            "memory_parallelism": parallelism,
+            "engine_version": info.version,
+            "engine_lang": info.lang,
+            "engine_class": info.class.as_str(),
+            "also_computes": info.also_computes,
+            "internally_parallel": info.internally_parallel,
         })
     );
     // Held until after the readings: dropping earlier would free the very
     // allocations being measured.
-    drop(engine);
+    drop(engines);
     Ok(())
 }
 
@@ -2176,20 +2491,87 @@ fn memory_child(args: &Args, name: &str) -> Result<()> {
 struct Footprint {
     heap_load_mb: Option<f64>,
     heap_encode_mb: Option<f64>,
+    memory_threads: Option<usize>,
+    memory_parallelism: Option<String>,
+    engine_version: Option<String>,
+    engine_lang: Option<String>,
+    engine_class: Option<String>,
+    also_computes: Option<String>,
+    internally_parallel: Option<bool>,
+    unsupported: Option<String>,
 }
 
-/// Spawn `memory_child` for one engine and read back its footprint.
-fn measure_memory(name: &str, model: &Model, corpus: &Path) -> Option<Footprint> {
+/// Spawn one isolated child per repetition and take the median footprint.
+fn measure_memory_repeated(
+    name: &str,
+    model: &Model,
+    corpus: &Path,
+    cache_capacity: Option<usize>,
+    threads: usize,
+    scaling_mode: &str,
+    reps: usize,
+) -> Option<Footprint> {
+    let samples: Vec<_> = (0..reps.max(1))
+        .filter_map(|_| {
+            measure_memory_once(name, model, corpus, cache_capacity, threads, scaling_mode)
+        })
+        .collect();
+    let first = samples.first()?;
+    if first.unsupported.is_some() {
+        return Some(Footprint {
+            unsupported: first.unsupported.clone(),
+            ..Default::default()
+        });
+    }
+    Some(Footprint {
+        heap_load_mb: median(
+            samples
+                .iter()
+                .filter_map(|sample| sample.heap_load_mb)
+                .collect(),
+        ),
+        heap_encode_mb: median(
+            samples
+                .iter()
+                .filter_map(|sample| sample.heap_encode_mb)
+                .collect(),
+        ),
+        memory_threads: first.memory_threads,
+        memory_parallelism: first.memory_parallelism.clone(),
+        engine_version: first.engine_version.clone(),
+        engine_lang: first.engine_lang.clone(),
+        engine_class: first.engine_class.clone(),
+        also_computes: first.also_computes.clone(),
+        internally_parallel: first.internally_parallel,
+        unsupported: None,
+    })
+}
+
+fn measure_memory_once(
+    name: &str,
+    model: &Model,
+    corpus: &Path,
+    cache_capacity: Option<usize>,
+    threads: usize,
+    scaling_mode: &str,
+) -> Option<Footprint> {
     let exe = std::env::current_exe().ok()?;
-    let out = Command::new(exe)
+    let mut command = Command::new(exe);
+    command
         .arg("--memory")
         .arg(name)
         .arg("--memory-model")
         .arg(&model.dir)
         .arg("--memory-corpus")
         .arg(corpus)
-        .output()
-        .ok()?;
+        .arg("--memory-threads")
+        .arg(threads.to_string())
+        .arg("--scaling-mode")
+        .arg(scaling_mode);
+    if let Some(capacity) = cache_capacity {
+        command.arg("--cache-capacity").arg(capacity.to_string());
+    }
+    let out = command.output().ok()?;
     let text = String::from_utf8_lossy(&out.stdout);
     let line = text
         .lines()
@@ -2197,9 +2579,21 @@ fn measure_memory(name: &str, model: &Model, corpus: &Path) -> Option<Footprint>
         .find(|l| l.trim_start().starts_with('{'))?;
     let v: serde_json::Value = serde_json::from_str(line).ok()?;
     let f = |k: &str| v.get(k).and_then(|x| x.as_f64());
+    let s = |k: &str| v.get(k).and_then(|x| x.as_str()).map(str::to_string);
     Some(Footprint {
         heap_load_mb: f("heap_load_mb"),
         heap_encode_mb: f("heap_encode_mb"),
+        memory_threads: v
+            .get("memory_threads")
+            .and_then(|x| x.as_u64())
+            .map(|x| x as usize),
+        memory_parallelism: s("memory_parallelism"),
+        engine_version: s("engine_version"),
+        engine_lang: s("engine_lang"),
+        engine_class: s("engine_class"),
+        also_computes: s("also_computes"),
+        internally_parallel: v.get("internally_parallel").and_then(|x| x.as_bool()),
+        unsupported: s("unsupported"),
     })
 }
 
@@ -2214,6 +2608,7 @@ mod tests {
             ("decode", MeasureCommand::Decode),
             ("latency", MeasureCommand::Latency),
             ("scaling", MeasureCommand::Scaling),
+            ("memory", MeasureCommand::Memory),
         ] {
             let args = Args::try_parse_from([
                 "tokbench", "measure", name, "--engine", "pipeline", "--model", "gpt2", "--corpus",
@@ -2262,13 +2657,59 @@ mod tests {
     }
 
     #[test]
+    fn parses_pipeline_cache_capacity_including_zero() {
+        let args = Args::try_parse_from([
+            "tokbench",
+            "measure",
+            "encode",
+            "--engine",
+            "pipeline",
+            "--cache-capacity",
+            "0",
+        ])
+        .unwrap();
+
+        assert_eq!(args.cache_capacity, Some(0));
+    }
+
+    #[test]
     fn parses_scaling_measurement_controls() {
         let args = Args::try_parse_from([
-            "tokbench", "measure", "scaling", "--engine", "pipeline", "--reps", "7",
+            "tokbench",
+            "measure",
+            "scaling",
+            "--engine",
+            "pipeline",
+            "--reps",
+            "7",
+            "--scaling-mode",
+            "independent-instances",
         ])
         .unwrap();
 
         assert_eq!(args.reps, 7);
+        assert_eq!(args.scaling_mode, "independent-instances");
+    }
+
+    #[test]
+    fn parses_memory_worker_controls() {
+        let args = Args::try_parse_from([
+            "tokbench",
+            "measure",
+            "memory",
+            "--engine",
+            "pipeline",
+            "--corpus",
+            "eng_Latn",
+            "--threads",
+            "8",
+            "--scaling-mode",
+            "independent-instances",
+        ])
+        .unwrap();
+
+        assert_eq!(args.threads.get(), 8);
+        assert_eq!(args.scaling_mode, "independent-instances");
     }
 
     #[test]

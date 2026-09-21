@@ -65,6 +65,7 @@ def main() -> None:
         "TOKBENCH_ENGINES",
         "TOKBENCH_MEASURE",
         "TOKBENCH_COMPARE_TO",
+        "TOKBENCH_CACHE_CAPACITY",
         "TOKBENCH_IMAGE",
         "TOKBENCH_INPUT_REVISION",
         "TOKBENCH_LATENCY",
@@ -80,6 +81,7 @@ def main() -> None:
         "TOKBENCH_RUNS",
         "TOKBENCH_SCALING",
         "TOKBENCH_SCALING_ORDER",
+        "TOKBENCH_SCALING_MODE",
         "TOKBENCH_SOURCE_REVISION",
     )
     document = {
