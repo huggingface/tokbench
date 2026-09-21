@@ -25,6 +25,7 @@ enum MeasureCommand {
     Latency,
     Scaling,
     Memory,
+    CrateSize,
 }
 
 #[derive(Subcommand, Debug)]
@@ -73,6 +74,11 @@ struct Args {
 
     #[arg(long, default_value = "tokenizer_bench_results.json", global = true)]
     out: PathBuf,
+
+    /// Use this tokenizers checkout for `measure crate-size` instead of the
+    /// command's pinned revision.
+    #[arg(long, global = true)]
+    tokenizers_source: Option<PathBuf>,
 
     #[arg(long, global = true)]
     open: bool,
@@ -452,6 +458,7 @@ fn print_collapsed_measurement_table(
         MeasureCommand::Memory => {
             headers.extend(["median loaded MB", "median working MB", "workers"].map(str::to_string))
         }
+        MeasureCommand::CrateSize => unreachable!("crate size uses its own report"),
     }
     if let Some(comparator) = compare_to {
         match measurement {
@@ -519,6 +526,7 @@ fn print_collapsed_measurement_table(
                     row.push(median_multiplier(ratios, expected));
                 }
             }
+            MeasureCommand::CrateSize => unreachable!("crate size uses its own report"),
             MeasureCommand::Decode => {
                 let complete: Vec<_> = entries
                     .iter()
@@ -928,6 +936,7 @@ fn print_measurement_table(runs: &[Run], measurement: MeasureCommand, compare_to
         })),
         MeasureCommand::Memory => headers
             .extend(["loaded MB", "working MB", "workers", "parallelism"].map(str::to_string)),
+        MeasureCommand::CrateSize => unreachable!("crate size uses its own report"),
     }
     if let Some(comparator) = compare_to {
         match measurement {
@@ -1227,6 +1236,7 @@ fn print_measurement_table(runs: &[Run], measurement: MeasureCommand, compare_to
                         );
                     }
                 }
+                MeasureCommand::CrateSize => unreachable!("crate size uses its own report"),
             }
             rows.push(row);
         }
@@ -1242,12 +1252,60 @@ fn print_measurement_table(runs: &[Run], measurement: MeasureCommand, compare_to
     }
 }
 
+fn measure_crate_size(args: &Args) -> Result<()> {
+    if !args.engine.is_empty() || args.compare_to.is_some() {
+        bail!("`tokbench measure crate-size` measures the tokenizers v1 crate graph; --engine and --compare-to do not apply");
+    }
+    if !args.corpus.is_empty() {
+        bail!("`tokbench measure crate-size` does not read corpora");
+    }
+    if args.model.len() > 1 {
+        bail!("`tokbench measure crate-size` accepts at most one --model");
+    }
+
+    let model = args.model.first().map(String::as_str).unwrap_or("gpt2");
+    let tokenizer = args.models.join(model).join("tokenizer.json");
+    if !tokenizer.is_file() {
+        bail!(
+            "no tokenizer.json for model {model} at {}; run `make models` or select another --model",
+            tokenizer.display()
+        );
+    }
+
+    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("../scripts/crate_size/measure.py");
+    let output = if args.out == Path::new("tokenizer_bench_results.json") {
+        PathBuf::from("crate_sizes.json")
+    } else {
+        args.out.clone()
+    };
+    let mut command = Command::new("python3");
+    command
+        .arg(&script)
+        .arg("--model")
+        .arg(&tokenizer)
+        .arg("--output")
+        .arg(&output);
+    if let Some(source) = &args.tokenizers_source {
+        command.arg("--tokenizers").arg(source);
+    }
+    let status = command
+        .status()
+        .with_context(|| format!("run {}", script.display()))?;
+    if !status.success() {
+        bail!("crate-size measurement failed with {status}");
+    }
+    Ok(())
+}
+
 fn main() -> Result<()> {
     let args = Args::parse();
     let measurement = args
         .command
         .as_ref()
         .map(|CliCommand::Measure { command }| *command);
+    if measurement == Some(MeasureCommand::CrateSize) {
+        return measure_crate_size(&args);
+    }
     let run_encode = measurement.is_none() || measurement == Some(MeasureCommand::Encode);
     let run_decode = match measurement {
         Some(command) => command == MeasureCommand::Decode,
@@ -1422,6 +1480,7 @@ fn main() -> Result<()> {
             MeasureCommand::Latency => "latency",
             MeasureCommand::Scaling => "scaling",
             MeasureCommand::Memory => "memory",
+            MeasureCommand::CrateSize => unreachable!("handled before the runtime matrix"),
         };
         eprintln!(
             "tokbench measure {name}: {} engine(s) × {} model(s) × {} corpus/corpora, {}",
@@ -2308,6 +2367,7 @@ mod tests {
             ("latency", MeasureCommand::Latency),
             ("scaling", MeasureCommand::Scaling),
             ("memory", MeasureCommand::Memory),
+            ("crate-size", MeasureCommand::CrateSize),
         ] {
             let args = Args::try_parse_from([
                 "tokbench", "measure", name, "--engine", "pipeline", "--model", "gpt2", "--corpus",

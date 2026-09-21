@@ -99,6 +99,28 @@ gpt2     2.25    5.21     1000                ×35.04                ×20.95
 | `latency` | p50/p99 for one short document |
 | `scaling` | throughput against thread count, with efficiency |
 | `memory` | live heap after load and after encode, isolated child |
+| `crate-size` | linked executable size across the tokenizers v1 crate and feature matrix |
+
+`measure crate-size` is a build measurement, so it does not load engines or
+corpora. It writes `crate_sizes.json` and measures separately linked, stripped,
+gzip-compressed executables for every selectable tokenizers v1 crate and
+`tk-encode` feature configuration. It runs the complete `minsize` and `slimest`
+matrices. The latter rebuilds `std` with `panic_immediate_abort`. Install the
+pinned build tools before running it:
+
+```bash
+cargo install cargo-matrix --version 0.4.5 --locked
+rustup toolchain install 1.97.1 --profile minimal
+rustup toolchain install nightly-2026-08-05 --profile minimal --component rust-src
+tokbench measure crate-size
+```
+
+By default the command downloads the pinned tokenizers revision and uses the
+GPT-2 fixture only to prove that the linked pre-split executable can load a real
+configuration. `--tokenizers-source ../tokenizers` measures a local checkout,
+`--model NAME` changes that load fixture, and `--out PATH` changes the output.
+The report records both tokenizers revisions, both Rust versions, the platform
+and the cargo-matrix version.
 
 Decode is timed over the *reference's* ids, or an engine that merges harder
 feeds itself fewer tokens and posts a better rate for less work. The decoded
