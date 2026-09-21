@@ -1,5 +1,13 @@
 # tokbench
 
+> [!IMPORTANT]  
+> The tokbench repository was heavily coded by agentic means to help us compare the performance of different
+> tokenization engines. We're very welcoming of any patches to help improve it going further.
+> 
+> We're especially welcoming of any tips to improve performance of any engine evaluated within that framework
+> for maximum fairness. Thank you!
+
+
 A fair benchmark of tokenizer implementations. One folder per engine, one
 timing loop per direction, and an id-verification gate so a number is never
 published for an engine that computed something different.
