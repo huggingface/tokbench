@@ -1,25 +1,8 @@
 #!/usr/bin/env python3
-"""Record the published package size of every engine.
-
-"How big is this dependency" is a real selection criterion, and it is not the
-same question as "how much does it add to my binary" (that is
-`scripts/binsize.sh`). A crate can be a small download that pulls a large
-dependency tree, or a large download that compiles to very little. Both
-columns are reported; neither substitutes for the other.
-
-Sizes come from each ecosystem's own registry, so they are the numbers a user
-actually downloads:
-
-  * crates.io -- the `.crate` tarball (gzipped source) for the exact pinned
-    version, plus the same for any second crate an engine needs.
-  * PyPI      -- the wheel for the newest release, falling back to the sdist.
-  * npm       -- the packed tarball, plus `unpackedSize` when the registry
-    reports it.
-
-Versions are pinned here to match what the engines actually build against.
-An unpinned size would drift away from the benchmark it is printed next to.
-
-Writes package_sizes.json, which the driver merges into the report.
+"""Published package size per engine, from each registry, into
+package_sizes.json. A different question from `scripts/binsize.sh`: a small
+download can pull a large dependency tree, and the reverse. Versions are
+pinned to what the engines build against.
 """
 
 import json
@@ -32,8 +15,7 @@ UA = {"User-Agent": "tokbench/0.1 (https://github.com/huggingface/tokbench)"}
 # engine folder -> where its code comes from.
 #   ("crates", [(name, version), ...])  sizes are summed
 #   ("pypi",   package)
-#   ("npm",    package)
-#   ("source", note)  -- vendored C/C++, no published package to weigh
+#   ("source", note)  -- built from source, no published package to weigh
 ENGINES = {
     "hf-tokenizers":  ("crates", [("tokenizers", "0.23.1")]),
     "fastokens":      ("crates", [("fastokens", "0.3.1")]),
@@ -43,14 +25,10 @@ ENGINES = {
     "rust-gems-bpe":  ("crates", [("bpe", "0.2.1"), ("bpe-openai", "0.3.0")]),
     "wordchipper":    ("crates", [("wordchipper", "0.9.2")]),
     "sentencepiece":  ("crates", [("sentencepiece", "0.14.0")]),
-    "blingfire":      ("crates", [("blingfire", "1.0.0")]),
     "llamacpp":       ("crates", [("llama-cpp-2", "0.1.154")]),
     "gigatoken":      ("pypi",   "gigatoken"),
     "executorch":     ("pypi",   "pytorch-tokenizers"),
-    "mistral-common": ("pypi",   "mistral-common"),
-    "ai-tokenizer":   ("npm",    "ai-tokenizer"),
     "pipeline":       ("source", "tokenizers 1.0.0-rc.0 @ 5c3727a9 - unreleased source"),
-    "minbpe":         ("source", "karpathy/minbpe - git only, no published package"),
     "iree":           ("source", "iree-org/iree - C source, built from the IREE tree"),
 }
 
@@ -61,7 +39,6 @@ def get_json(url: str):
 
 
 def crate_size(name: str, version: str) -> int:
-    """Size of the published `.crate` tarball, in bytes."""
     data = get_json(f"https://crates.io/api/v1/crates/{name}/{version}")
     return int(data["version"]["crate_size"])
 
@@ -70,23 +47,12 @@ def pypi_size(name: str) -> tuple[int, str]:
     data = get_json(f"https://pypi.org/pypi/{name}/json")
     version = data["info"]["version"]
     urls = data["urls"]
-    # Prefer a wheel: it is what `pip install` actually fetches.
-    wheels = [u for u in urls if u["packagetype"] == "bdist_wheel"]
-    chosen = wheels or urls
+    # A wheel is what `pip install` fetches; the largest, since they are
+    # per-platform and the smallest may be a pure-Python stub.
+    chosen = [u for u in urls if u["packagetype"] == "bdist_wheel"] or urls
     if not chosen:
         raise ValueError("no distributions")
-    # Wheels are per-platform; report the largest so the number is not an
-    # accidental best case from a pure-Python stub.
     return max(int(u["size"]) for u in chosen), version
-
-
-def npm_size(name: str) -> tuple[int, str, int | None]:
-    data = get_json(f"https://registry.npmjs.org/{name}")
-    version = data["dist-tags"]["latest"]
-    dist = data["versions"][version]["dist"]
-    return int(dist.get("fileCount", 0) and dist["unpackedSize"] or 0) or 0, version, dist.get(
-        "unpackedSize"
-    )
 
 
 def main() -> None:
@@ -106,11 +72,6 @@ def main() -> None:
                 size, ver = pypi_size(spec[1])
                 out[engine] = {"kb": round(size / 1024, 1), "version": f"{spec[1]} {ver}",
                                "registry": "pypi"}
-            elif kind == "npm":
-                _, ver, unpacked = npm_size(spec[1])
-                size = unpacked or 0
-                out[engine] = {"kb": round(size / 1024, 1), "version": f"{spec[1]} {ver}",
-                               "registry": "npm (unpacked)"}
             else:
                 out[engine] = {"kb": None, "version": spec[1], "registry": "source"}
                 print(f"{prefix} n/a  ({spec[1]})", file=sys.stderr)

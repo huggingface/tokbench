@@ -1,23 +1,8 @@
-//! A minimal program that loads one tokenizer and encodes one string.
-//!
-//! Built once per engine with exactly that engine's feature enabled, stripped,
-//! and measured. The difference against the no-engine baseline build is "what
-//! adding this library costs my binary".
-//!
-//! It must actually *run* the engine, not merely reference it. With
-//! `lto = "fat"` the linker discards anything unreachable, so a program that
-//! only mentions a type would measure nothing and report a suspiciously small
-//! size. `scripts/binsize.sh` therefore executes each binary before stating
-//! its size, and this `main` encodes a real string and prints the token count
-//! so the work cannot be optimised away.
-
 use std::path::PathBuf;
 
+#[allow(unused_imports)]
 use tokbench_core::{Build, Engine, Model, Unsupported};
 
-/// Whichever engine this build enabled. Exactly one is expected; the `cfg`
-/// chain picks the first, and the no-engine build returns `None` to establish
-/// the baseline.
 #[allow(unreachable_code)]
 fn engine(model: &Model) -> Option<Result<Box<dyn Engine>, Unsupported>> {
     #[cfg(feature = "hf-tokenizers")]
@@ -38,8 +23,6 @@ fn engine(model: &Model) -> Option<Result<Box<dyn Engine>, Unsupported>> {
     return Some(tokbench_wordchipper::Adapter::build(model));
     #[cfg(feature = "sentencepiece")]
     return Some(tokbench_sentencepiece::Adapter::build(model));
-    #[cfg(feature = "blingfire")]
-    return Some(tokbench_blingfire::Adapter::build(model));
     #[cfg(feature = "gigatoken")]
     return Some(tokbench_gigatoken::Adapter::build(model));
     #[cfg(feature = "llamacpp")]

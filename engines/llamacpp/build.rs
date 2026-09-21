@@ -1,57 +1,10 @@
-//! Find an llama.cpp that is already on the machine, and link only against it.
-//!
-//! # Why this does not build llama.cpp
-//!
-//! The obvious wiring is `llama-cpp-2`, which vendors the upstream tree and
-//! compiles it. That turns `cargo check -p tokbench-llamacpp` into a multi-
-//! minute build of an entire inference engine — CUDA/Metal/BLAS backends, the
-//! sampler, the KV cache, the server helpers — none of which affects the one
-//! number this crate exists to produce. So instead: locate an installed
-//! llama.cpp (`brew install llama.cpp`, a distro package, or a local build
-//! pointed at by `LLAMA_CPP_DIR`), compile the 40-line shim in `src/shim.c`
-//! against its headers, and link `-lllama`. That is a one-second build.
-//!
-//! Linking the shared `libllama` does not link the backends either: on macOS
-//! and Linux the ggml backend libraries are separate shared objects that
-//! `libllama` references by its own install name / SONAME, and with
-//! `vocab_only = true` none of them is ever loaded at run time (verified: a
-//! vocab-only load prints no backend or device line at all).
-//!
-//! # Why it must not fail the build
-//!
-//! Fairness rule: every engine in this workspace is optional and the workspace
-//! has to build on a machine with no system libraries at all. A missing
-//! llama.cpp is therefore not an error — it emits one `cargo:warning`, leaves
-//! the `llamacpp` cfg unset, and `src/lib.rs` compiles to a stub whose
-//! `build()` returns `Unsupported` with instructions. Nothing in here panics.
-//!
-//! # Where it looks, in order
-//!
-//! 1. `LLAMA_CPP_INCLUDE` / `LLAMA_CPP_LIB` — explicit override, `:`-separated.
-//! 2. `LLAMA_CPP_DIR` — an install prefix or a built source tree; the usual
-//!    subdirectories of both layouts are tried.
-//! 3. `pkg-config llama` — what `brew install llama.cpp` and most distro
-//!    packages register. Also the source of the reported version.
-//! 4. Homebrew / FHS prefixes.
-//!
-//! `ggml.h` is searched for separately from `llama.h`: `llama.h` includes it,
-//! but Homebrew splits llama.cpp and ggml into two formulae with two include
-//! directories, so finding one does not imply finding the other.
-
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 struct Found {
-    /// Every include dir needed to compile `#include "llama.h"` — at least one
-    /// holding `llama.h`, at least one holding `ggml.h`, often two different
-    /// directories.
     includes: Vec<PathBuf>,
     libdir: PathBuf,
-    /// Libraries to pass to the linker. One entry (`llama`) for a shared
-    /// install; the ggml archives too when only static libs are present.
     libs: Vec<String>,
-    /// True when the only llama library found is a `.a`, which means the ggml
-    /// archives and the C++ runtime have to be named explicitly.
     static_link: bool,
     version: String,
 }
@@ -69,8 +22,6 @@ fn main() {
     }
 
     let Some(found) = locate() else {
-        // `env!` in lib.rs needs this set on both paths or the stub will not
-        // compile.
         println!("cargo:rustc-env=TOKBENCH_LLAMACPP_VERSION=absent");
         println!(
             "cargo:warning=llama.cpp not found (looked at pkg-config `llama`, \
@@ -96,7 +47,6 @@ fn main() {
         println!("cargo:rustc-link-lib={lib}");
     }
     if found.static_link {
-        // Static llama.cpp is C++ and does not carry its runtime with it.
         let cxx = if cfg!(target_os = "macos") {
             "c++"
         } else {
@@ -104,8 +54,6 @@ fn main() {
         };
         println!("cargo:rustc-link-lib=dylib={cxx}");
     }
-    // Switches src/lib.rs from the stub to the real engine. Declared above via
-    // rustc-check-cfg so an unset `llamacpp` is a known cfg rather than a lint.
     println!("cargo:rustc-cfg=llamacpp");
     println!(
         "cargo:rustc-env=TOKBENCH_LLAMACPP_VERSION={}",
@@ -123,8 +71,6 @@ fn locate() -> Option<Found> {
     let mut lib_candidates: Vec<PathBuf> = Vec::new();
     let mut version: Option<String> = None;
 
-    // 1. Explicit override wins, and is the only way to be sure on a machine
-    //    with several llama.cpp builds.
     if let Ok(v) = std::env::var("LLAMA_CPP_INCLUDE") {
         inc_candidates.extend(v.split(':').filter(|s| !s.is_empty()).map(PathBuf::from));
     }
@@ -132,9 +78,6 @@ fn locate() -> Option<Found> {
         lib_candidates.extend(v.split(':').filter(|s| !s.is_empty()).map(PathBuf::from));
     }
 
-    // 2. A prefix or a source tree. `build/bin` is where a cmake build of
-    //    llama.cpp drops the shared objects; `ggml/include` is where the
-    //    in-tree ggml headers live before installation.
     if let Ok(dir) = std::env::var("LLAMA_CPP_DIR") {
         let d = PathBuf::from(dir);
         for sub in ["include", "ggml/include", "src", "ggml/src"] {
@@ -146,13 +89,7 @@ fn locate() -> Option<Found> {
         inc_candidates.push(d.clone());
     }
 
-    // 3. pkg-config. Also the only place that knows the exact version, which
-    //    the report prints — a throughput number without a version is not a
-    //    result (see core's Info::version).
     if let Some(v) = pkg_config_var("--modversion") {
-        // llama.cpp's .pc reports 0.0.<build>, and the upstream release tag for
-        // that build is b<build>. Reporting "b9140" makes the row traceable to
-        // a commit; reporting "0.0.9140" does not.
         version = Some(match v.strip_prefix("0.0.") {
             Some(build) => format!("b{build}"),
             None => v,
@@ -165,8 +102,6 @@ fn locate() -> Option<Found> {
         lib_candidates.push(PathBuf::from(v));
     }
 
-    // 4. Well-known prefixes. Homebrew keeps llama.cpp and ggml in separate
-    //    formulae, hence both.
     for prefix in ["/opt/homebrew", "/usr/local", "/usr"] {
         for formula in ["opt/llama.cpp", "opt/ggml", ""] {
             let base = Path::new(prefix).join(formula);
@@ -175,8 +110,6 @@ fn locate() -> Option<Found> {
         }
     }
 
-    // Resolve: keep every existing candidate that actually carries a header we
-    // need, and require that both headers turned up somewhere.
     let mut includes: Vec<PathBuf> = Vec::new();
     let (mut have_llama_h, mut have_ggml_h) = (false, false);
     for c in inc_candidates {
@@ -195,9 +128,6 @@ fn locate() -> Option<Found> {
         return None;
     }
 
-    // A shared library is strongly preferred: it is what the packaged builds
-    // ship, and its recorded install name/SONAME lets the loader find ggml
-    // without this crate having to name it.
     let mut fallback_static: Option<PathBuf> = None;
     let mut libdir: Option<PathBuf> = None;
     for c in &lib_candidates {
@@ -217,9 +147,6 @@ fn locate() -> Option<Found> {
 
     let mut libs = vec!["llama".to_string()];
     if static_link {
-        // Order matters for a static link: llama depends on ggml, ggml on
-        // ggml-base. Only name the ones that are actually there, so a build
-        // that fused them into one archive still links.
         for extra in ["ggml", "ggml-cpu", "ggml-base"] {
             if libdir.join(format!("lib{extra}.a")).exists() {
                 libs.push(extra.to_string());

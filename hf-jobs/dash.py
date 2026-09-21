@@ -115,7 +115,7 @@ def main() -> None:
     parser.add_argument("--run")
     parser.add_argument("--results", type=Path)
     parser.add_argument(
-        "--cache-dir", type=Path, default=ROOT / ".tokbench" / "jobs"
+        "--cache-dir", type=Path, default=ROOT / ".tokbench" / "hf-jobs"
     )
     parser.add_argument(
         "--stage-dir", type=Path, default=ROOT / ".tokbench" / "dash"

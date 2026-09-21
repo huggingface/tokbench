@@ -1,46 +1,13 @@
-//! HuggingFace `tokenizers` — the baseline, and the oracle every other
-//! engine's ids are checked against.
-//!
-//! This engine is privileged in one way only: its id stream defines "correct".
-//! It gets no advantage in measurement — it goes through the same
-//! `tokbench_core::measure` as everything else.
-//!
-//! Two fairness notes specific to this crate:
-//!
-//! * `encode` is called with `add_special_tokens = false`. That is the common
-//!   denominator across the matrix: tiktoken, rust-gems-bpe and the raw
-//!   byte-level engines have no notion of a post-processor template, so
-//!   leaving specials on would charge this engine for work the others are not
-//!   asked to do and make the id streams incomparable.
-//! * The full `encode` path also computes byte offsets and word ids, which
-//!   several competitors do not. That cost is left in — it is what a caller of
-//!   this API actually pays — and is disclosed through `Info::also_computes`
-//!   so the report can say so next to the number.
-
-use std::time::Instant;
-
-use tokbench_core::{
-    unsupported, Build, Class, Engine, Ids, Info, Model, Padding, Phases, Unsupported,
-};
-use tokenizers::tokenizer::{Model as _, Normalizer as _, PostProcessor as _, PreTokenizer as _};
-use tokenizers::{NormalizedString, OffsetType, PreTokenizedString, Tokenizer};
+use tokbench_core::{unsupported, Build, Class, Engine, Ids, Info, Model, Padding, Unsupported};
+use tokenizers::Tokenizer;
 
 pub struct Adapter {
     tok: Tokenizer,
-    /// Sized by `set_threads`; `encode_batch` runs inside it. `None` means one
-    /// thread, where a pool would only add overhead.
     pool: Option<rayon::ThreadPool>,
     threads: usize,
 }
 
 impl Build for Adapter {
-    /// `BpeBuilder::cache_capacity` exists, but it is builder-only: the field
-    /// is absent from `models/bpe/serialization.rs`, so a `tokenizer.json`
-    /// cannot carry it and `Tokenizer::from_file` -- the only constructor this
-    /// adapter uses -- has no way to pass it. Disabling the cache would mean
-    /// pulling vocab and merges back out of the loaded model and rebuilding
-    /// the BPE through the builder, which is a different construction path
-    /// from the one every other number in this row was measured on.
     fn build_without_cache(_model: &Model) -> Result<Box<dyn Engine>, Unsupported> {
         Err(Unsupported(
             "0.23.1 takes cache_capacity only through BpeBuilder, and the field is not in the \
@@ -76,14 +43,11 @@ impl Engine for Adapter {
             class: Class::Native,
             url: "https://github.com/huggingface/tokenizers",
             also_computes: "byte offsets, word ids, attention mask",
-            // Reported from the thread count actually installed, not declared.
             internally_parallel: self.threads > 1,
         }
     }
 
     fn encode(&mut self, text: &str, out: &mut Ids) {
-        // A cell that fails mid-run must not silently look fast. Leaving `out`
-        // short changes the id hash, so verification flags it.
         if let Ok(enc) = self.tok.encode(text, false) {
             out.extend_from_slice(enc.get_ids());
         }
@@ -93,14 +57,6 @@ impl Engine for Adapter {
         true
     }
 
-    /// Two knobs, both the library's own, and both required.
-    ///
-    /// `set_parallelism` is the flag `maybe_par_iter` consults: with it off,
-    /// `encode_batch` runs serially however many threads are available. The
-    /// rayon pool is then what decides *how many* -- `encode_batch`
-    /// parallelises over the current pool, so installing a sized pool is how
-    /// this library is asked for exactly `threads`. The alternative,
-    /// `RAYON_NUM_THREADS`, is process-wide and cannot vary across a sweep.
     fn set_threads(&mut self, threads: usize) -> bool {
         if threads == 0 {
             return false;
@@ -109,8 +65,6 @@ impl Engine for Adapter {
         self.pool = if threads > 1 {
             match rayon::ThreadPoolBuilder::new().num_threads(threads).build() {
                 Ok(pool) => Some(pool),
-                // Refuse rather than quietly run on the global pool, which
-                // would report some other width as `threads`.
                 Err(_) => return false,
             }
         } else {
@@ -120,8 +74,6 @@ impl Engine for Adapter {
         true
     }
 
-    /// `Tokenizer::encode_batch` — the library's own batch path, and the only
-    /// one that touches its rayon fan-out.
     fn encode_batch(&mut self, texts: &[&str], out: &mut Ids) {
         let encode = || self.tok.encode_batch(texts.to_vec(), false);
         let encoded = match &self.pool {
@@ -135,8 +87,6 @@ impl Engine for Adapter {
         }
     }
 
-    /// `with_padding` — `PaddingParams::default()` is already `BatchLongest`,
-    /// which is exactly [`Padding::Longest`].
     fn set_padding(&mut self, padding: Padding) -> bool {
         match padding {
             Padding::Off => self.tok.with_padding(None),
@@ -147,12 +97,6 @@ impl Engine for Adapter {
         true
     }
 
-    /// `skip_special_tokens = false` to match `encode`'s
-    /// `add_special_tokens = false`: neither direction adds or removes
-    /// anything the other did not.
-    ///
-    /// This is the decode oracle — every other engine's decoded text is
-    /// compared against this one's.
     fn decode(&mut self, ids: &[u32], out: &mut String) -> Result<(), Unsupported> {
         match self.tok.decode(ids, false) {
             Ok(s) => {
@@ -161,44 +105,5 @@ impl Engine for Adapter {
             }
             Err(e) => unsupported(format!("decode failed: {e}")),
         }
-    }
-
-    /// Re-runs the pipeline stage by stage. This deliberately does NOT reuse
-    /// `encode`: it walks normalizer → pre-tokenizer → model → post-processor
-    /// by hand so each stage gets its own clock. It is only ever called
-    /// outside the timed loop.
-    fn phases(&mut self, text: &str) -> Option<Phases> {
-        let mut normalized = NormalizedString::from(text);
-        let t = Instant::now();
-        if let Some(n) = self.tok.get_normalizer() {
-            n.normalize(&mut normalized).ok()?;
-        }
-        let normalization_ns = t.elapsed().as_nanos() as u64;
-
-        let mut pre = PreTokenizedString::from(normalized);
-        let t = Instant::now();
-        if let Some(p) = self.tok.get_pre_tokenizer() {
-            p.pre_tokenize(&mut pre).ok()?;
-        }
-        let pre_tokenization_ns = t.elapsed().as_nanos() as u64;
-
-        let model = self.tok.get_model();
-        let t = Instant::now();
-        pre.tokenize(|s| model.tokenize(s.get())).ok()?;
-        let core_encoding_ns = t.elapsed().as_nanos() as u64;
-
-        let t = Instant::now();
-        let enc = pre.into_encoding(None, 0, OffsetType::Byte).ok()?;
-        if let Some(pp) = self.tok.get_post_processor() {
-            pp.process(enc, None, false).ok()?;
-        }
-        let post_processing_ns = t.elapsed().as_nanos() as u64;
-
-        Some(Phases {
-            normalization_ns,
-            pre_tokenization_ns,
-            core_encoding_ns,
-            post_processing_ns,
-        })
     }
 }

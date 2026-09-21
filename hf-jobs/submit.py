@@ -249,7 +249,7 @@ def main() -> None:
             json.dumps(
                 {
                     "image": args.image,
-                    "command": ["bash", "jobs/run.sh"],
+                    "command": ["bash", "hf-jobs/run.sh"],
                     "flavor": args.flavor,
                     "namespace": args.namespace,
                     "timeout": args.timeout,
@@ -282,7 +282,7 @@ def main() -> None:
 
     job = run_job(
         image=args.image,
-        command=["bash", "jobs/run.sh"],
+        command=["bash", "hf-jobs/run.sh"],
         flavor=args.flavor,
         namespace=args.namespace,
         timeout=args.timeout,

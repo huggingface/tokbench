@@ -2573,7 +2573,6 @@ dependencies = [
  "regex",
  "serde",
  "serde_json",
- "tokbench-blingfire",
  "tokbench-core",
  "tokbench-executorch",
  "tokbench-fastokens",
@@ -2594,7 +2593,6 @@ dependencies = [
 name = "tokbench-binsize"
 version = "0.1.0"
 dependencies = [
- "tokbench-blingfire",
  "tokbench-core",
  "tokbench-executorch",
  "tokbench-fastokens",
@@ -2609,13 +2607,6 @@ dependencies = [
  "tokbench-tiktoken",
  "tokbench-tokie",
  "tokbench-wordchipper",
-]
-
-[[package]]
-name = "tokbench-blingfire"
-version = "0.1.0"
-dependencies = [
- "tokbench-core",
 ]
 
 [[package]]

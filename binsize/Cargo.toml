@@ -22,7 +22,6 @@ tokbench-tiktoken = { path = "../engines/tiktoken", optional = true }
 tokbench-rust-gems-bpe = { path = "../engines/rust-gems-bpe", optional = true }
 tokbench-wordchipper = { path = "../engines/wordchipper", optional = true }
 tokbench-sentencepiece = { path = "../engines/sentencepiece", optional = true }
-tokbench-blingfire = { path = "../engines/blingfire", optional = true }
 tokbench-gigatoken = { path = "../engines/gigatoken", optional = true }
 tokbench-llamacpp = { path = "../engines/llamacpp", optional = true }
 tokbench-iree = { path = "../engines/iree", optional = true }
@@ -40,7 +39,6 @@ tiktoken = ["dep:tokbench-tiktoken"]
 rust-gems-bpe = ["dep:tokbench-rust-gems-bpe"]
 wordchipper = ["dep:tokbench-wordchipper"]
 sentencepiece = ["dep:tokbench-sentencepiece"]
-blingfire = ["dep:tokbench-blingfire"]
 gigatoken = ["dep:tokbench-gigatoken"]
 llamacpp = ["dep:tokbench-llamacpp"]
 iree = ["dep:tokbench-iree"]

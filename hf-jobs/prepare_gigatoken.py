@@ -9,7 +9,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 MANIFEST = ROOT / "engines" / "gigatoken" / "Cargo.toml"
-LOCK_SOURCE = ROOT / "jobs" / "Cargo.gigatoken.lock"
+LOCK_SOURCE = ROOT / "hf-jobs" / "Cargo.gigatoken.lock"
 LOCK_DESTINATION = ROOT / "Cargo.lock"
 DEPENDENCY = (
     'gigatoken_rs = { package = "gigatoken", '

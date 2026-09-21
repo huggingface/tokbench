@@ -1,25 +1,3 @@
-//! kitoken — one crate covering BPE, Unigram and WordPiece.
-//!
-//! Notable in this lineup because its model coverage is broad: most of the
-//! fast engines here handle byte-level BPE and give up on Unigram and
-//! WordPiece, which is exactly where the id mismatches in this matrix cluster.
-//! kitoken claims all three, so it is one of the few engines that can be held
-//! to the reference across the whole model set rather than just the easy part
-//! of it.
-//!
-//! It reads `tokenizer.json` directly through `from_tokenizers_file`, so it is
-//! measured on the same artifact as the reference — no separate conversion
-//! step that could silently change the vocabulary.
-//!
-//! `encode(text, false)` disables special-token recognition, matching the
-//! `add_special_tokens = false` the reference is called with.
-//!
-//! Built with kitoken's default features rather than a hand-tuned set: that is
-//! what `cargo add kitoken` gives you, so it is the configuration whose
-//! throughput and binary size a reader would actually get. (`multiversion` and
-//! `regex-perf` are among those defaults, so this is its fast path, not a
-//! handicapped one.)
-
 use tokbench_core::{Build, Class, Engine, Ids, Info, Model, Unsupported};
 
 pub struct Adapter {

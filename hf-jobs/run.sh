@@ -85,7 +85,7 @@ split_csv "${engines_csv}" engine_items
 split_csv "${scaling_csv}" scaling_items
 split_csv "${latency_csv}" latency_items
 
-python3 jobs/collect_environment.py "${output_dir}/environment-before.json"
+python3 hf-jobs/collect_environment.py "${output_dir}/environment-before.json"
 
 # The source dataset is private today, so HF_TOKEN is normally supplied as a
 # Job secret. The revision is mandatory because `main` is not reproducible.
@@ -159,11 +159,11 @@ for ((run = 1; run <= runs; run++)); do
 done
 
 if [[ -z "${measure}" || "${measure}" == scaling ]]; then
-  python3 jobs/summarize_scaling.py \
+  python3 hf-jobs/summarize_scaling.py \
     "${output_dir}/scaling-summary.json" \
     "${output_dir}"/run-*.json
 fi
-python3 jobs/collect_environment.py "${output_dir}/environment-after.json"
+python3 hf-jobs/collect_environment.py "${output_dir}/environment-after.json"
 (
   cd "${output_dir}"
   find . -maxdepth 1 -type f ! -name artifact-sha256.txt -print0 \

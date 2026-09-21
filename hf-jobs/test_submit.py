@@ -126,7 +126,7 @@ class PublishSpaceTests(unittest.TestCase):
 
     def test_gigatoken_recipe_uses_pinned_nightly_and_prebuilt_binary(self) -> None:
         recipe = render_dockerfile("1" * 40, gigatoken=True)
-        self.assertIn("python3 jobs/prepare_gigatoken.py", recipe)
+        self.assertIn("python3 hf-jobs/prepare_gigatoken.py", recipe)
         self.assertIn("nightly-2026-08-05", recipe)
         self.assertIn("-Z profile-rustflags", recipe)
         self.assertIn("--features rust-engines,gigatoken", recipe)

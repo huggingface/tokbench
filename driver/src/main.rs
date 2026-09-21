@@ -1,19 +1,3 @@
-//! `tokbench` — run every compiled-in engine over the model × corpus matrix
-//! through the one timing loop in `tokbench_core`, verify the ids, and write
-//! the JSON the dashboard reads.
-//!
-//! There is no benchmarking framework underneath this. That is deliberate and
-//! it is the smaller amount of code, not the larger: `divan` has no
-//! machine-readable output (JSON/CSV is still a planned feature), and
-//! `criterion`'s `estimates.json` is documented as a private implementation
-//! detail that may change without warning, needs `cargo-criterion` plus
-//! `harness = false`, and owns `fn main()`. Neither can express an
-//! engine × model matrix, and neither verifies that two engines produced the
-//! same ids — the property that makes a throughput comparison mean anything.
-//! Wrapping either would mean parsing its output back into this schema. The
-//! measurement itself is ~25 lines in `tokbench_core::measure`, shared by every
-//! engine, and that is the whole of it.
-
 mod registry;
 
 use std::collections::BTreeMap;
@@ -27,33 +11,24 @@ use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use serde::{Deserialize, Serialize};
 use tokbench_core::{
-    chunk, measure, measure_decode, measure_latency, measure_scaling_with_mode, Ids, Model, Phases,
+    chunk, measure, measure_decode, measure_latency, measure_scaling_with_mode, Ids, Model,
     ScalingMode,
 };
 
-/// ~10 kB documents: large enough that per-call overhead is amortised, small
-/// enough to stay in cache. Matches the upstream pipeline benchmark so numbers
-/// remain comparable with it.
 const CHUNK_BYTES: usize = 10 * 1024;
 const MAX_CHUNKS: usize = 100;
 
 #[derive(Subcommand, Clone, Copy, Debug, PartialEq, Eq)]
 enum MeasureCommand {
-    /// Single-thread encode throughput.
     Encode,
-    /// Decode throughput over the reference engine's token IDs.
     Decode,
-    /// Call-level encode latency.
     Latency,
-    /// Multi-thread encode throughput and efficiency.
     Scaling,
-    /// Live heap held by a loaded and warmed tokenizer.
     Memory,
 }
 
 #[derive(Subcommand, Debug)]
 enum CliCommand {
-    /// Run exactly one measurement family and skip every unrelated pass.
     Measure {
         #[command(subcommand)]
         command: MeasureCommand,
@@ -69,109 +44,66 @@ struct Args {
     #[command(subcommand)]
     command: Option<CliCommand>,
 
-    /// Directory of model directories; each subdirectory holds one model's
-    /// artifacts (tokenizer.json plus any engine-specific files).
     #[arg(long, default_value = "data/models", global = true)]
     models: PathBuf,
 
-    /// Directory of `.txt` corpora.
     #[arg(long, default_value = "data/fixtures", global = true)]
     corpora: PathBuf,
 
-    /// Timed passes per cell; the median is reported.
     #[arg(long, default_value_t = 5, global = true)]
     reps: usize,
 
-    /// Skip the warm-up pass to report cold-cache numbers instead.
     #[arg(long, global = true)]
     no_warmup: bool,
 
-    /// Override the tokenizers v1 pipeline BPE word-cache capacity.
-    /// `0` disables the cache; omission preserves the upstream default (65,536).
     #[arg(long, global = true)]
     cache_capacity: Option<usize>,
 
-    /// Only run these engines (repeatable). Use `all`, or omit, for everything
-    /// compiled in that supports the selected measurement.
     #[arg(long, global = true)]
     engine: Vec<String>,
 
-    /// Also measure this engine and report the target's speed relative to it.
     #[arg(long, global = true)]
     compare_to: Option<String>,
 
-    /// Only run these models (repeatable).
     #[arg(long, global = true)]
     model: Vec<String>,
 
-    /// Only run these corpora (repeatable).
     #[arg(long, global = true)]
     corpus: Vec<String>,
 
     #[arg(long, default_value = "tokenizer_bench_results.json", global = true)]
     out: PathBuf,
 
-    /// Open the dashboard in a browser once the JSON is written.
     #[arg(long, global = true)]
     open: bool,
 
-    /// Interpreter used for scripted (Python) engines.
-    #[arg(long, default_value = "python3", global = true)]
-    python: String,
-
-    /// Skip the per-engine footprint child processes (they roughly double wall
-    /// time,
-    /// since each one reloads the model).
     #[arg(long, global = true)]
     no_memory: bool,
 
-    /// Skip the decode pass. Decode is measured over the reference engine's
-    /// ids, so this also skips the extra reference encode that produces them.
     #[arg(long, global = true)]
     no_decode: bool,
 
-    /// Measure call-level encode latency on these corpora (repeatable).
     #[arg(long = "latency")]
     latency: Vec<String>,
 
-    /// Maximum bytes in each distinct latency document.
     #[arg(long, default_value_t = 512, global = true)]
     latency_bytes: usize,
 
-    /// Maximum number of distinct call-level latency samples per engine and cell.
     #[arg(long, default_value_t = 1_000, global = true)]
     latency_samples: usize,
 
-    /// Run the multi-thread scaling sweep on these corpora (repeatable).
-    ///
-    /// Scoped to named corpora rather than run everywhere because the sweep
-    /// builds and warms one engine per thread at every thread count — on an
-    /// 8-core box that is ~25 extra full-corpus encodes per engine per cell,
-    /// which would dominate the wall time of a full matrix. Scaling behaviour
-    /// barely varies by language, so one or two representative corpora give
-    /// the same answer for a fraction of the cost.
     #[arg(long = "scaling")]
     scaling: Vec<String>,
 
-    /// Do not include thread counts above this value in scaling sweeps.
-    /// Useful on large cloud instances when the published claim is scoped to
-    /// a fixed core count such as 8.
     #[arg(long, global = true)]
     max_threads: Option<NonZeroUsize>,
 
-    /// Worker count for `measure memory`. At one worker this measures one
-    /// tokenizer. At larger counts the selected scaling mode decides whether
-    /// that is one native pool or several independent tokenizer instances.
     #[arg(long, default_value_t = NonZeroUsize::new(1).unwrap(), global = true)]
     threads: NonZeroUsize,
 
-    /// Measure scaling points from the highest thread count down to one.
-    /// Jobs alternate this with the default order to expose temporal drift.
     #[arg(long, global = true)]
     reverse_scaling: bool,
 
-    /// How scaling workers are supplied: the engine's native thread pool,
-    /// independent single-threaded instances, or automatic capability-based selection.
     #[arg(
         long,
         value_parser = ["auto", "native-threads", "independent-instances"],
@@ -180,15 +112,6 @@ struct Args {
     )]
     scaling_mode: String,
 
-    /// Which padding modes the scaling sweep measures: `off`, `longest`, or
-    /// `both`.
-    ///
-    /// Both by default. Padding to the longest document in a batch is a large
-    /// and uneven cost -- a fill, often a second pass, sometimes a different
-    /// output layout -- and it is a hard requirement for anyone feeding
-    /// rectangular tensors, so the unpadded number alone is not usable for
-    /// serving. Engines with no native padding report the padded cell as
-    /// unsupported; the harness never pads on an engine's behalf.
     #[arg(
         long = "padding",
         value_parser = ["off", "longest", "both"],
@@ -197,12 +120,9 @@ struct Args {
     )]
     padding: String,
 
-    /// Per-engine stripped binary deltas, as written by `scripts/binsize.sh`.
-    /// Merged into the report when present.
     #[arg(long, default_value = "binary_sizes.json")]
     binary_sizes: PathBuf,
 
-    /// Published package sizes, as written by `scripts/package_size.py`.
     #[arg(long, default_value = "package_sizes.json")]
     package_sizes: PathBuf,
 
@@ -231,18 +151,8 @@ struct DatasetMetadata {
     model: String,
     reps: usize,
     warmup: bool,
-    /// Explicit tokenizers v1 pipeline cache capacity. Absent means the
-    /// upstream default recorded by the pinned engine revision.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pipeline_cache_capacity: Option<usize>,
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug, Default)]
-struct Breakdown {
-    normalization: u64,
-    pre_tokenization: u64,
-    core_encoding: u64,
-    post_processing: u64,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
@@ -251,100 +161,56 @@ struct EngineResult {
     total_tokens_produced: usize,
     mean_execution_time_seconds: f64,
 
-    /// `None` when the engine's API cannot separate its stages. The dashboard
-    /// renders that as "not instrumented"; it never invents a split.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    breakdown_nanoseconds: Option<Breakdown>,
-
     // --- fairness disclosure; see tokbench_core's module docs ---
     engine_version: String,
     engine_lang: String,
-    /// native | cffi | python | subprocess. Only same-class numbers are ranked
-    /// against each other without a caveat.
     engine_class: String,
-    /// Work done on the same pass beyond producing ids (e.g. "byte offsets").
     also_computes: String,
     internally_parallel: bool,
-    /// Excluded from the timed region and reported separately.
     load_ms: f64,
     mbps: f64,
     ns_per_byte: f64,
     ids_hash: String,
-    /// `true`/`false` against the reference engine; `None` when no reference
-    /// ran, so nothing could be checked.
     verified: Option<bool>,
-    /// Set when the engine could not run this cell, with the reason.
     #[serde(skip_serializing_if = "Option::is_none")]
     unsupported: Option<String>,
 
     // --- decode direction; all `None` under `--no-decode` ---
-    /// MB/s of text produced, decoding the REFERENCE engine's ids. Not the
-    /// engine's own ids: see fairness rule 7.
     #[serde(skip_serializing_if = "Option::is_none")]
     decode_mbps: Option<f64>,
-    /// The input-side rate, and the one to compare when two engines produce
-    /// text of different lengths from the same ids.
     #[serde(skip_serializing_if = "Option::is_none")]
     decode_ns_per_token: Option<f64>,
-    /// Hash of the decoded text, the decode-side counterpart of `ids_hash`.
     #[serde(skip_serializing_if = "Option::is_none")]
     decode_text_hash: Option<String>,
-    /// `true`/`false` against the reference engine's decoded text; `None`
-    /// when no reference decode ran, so nothing could be checked.
     #[serde(skip_serializing_if = "Option::is_none")]
     decode_verified: Option<bool>,
-    /// Why this engine produced no decode number — usually that its library
-    /// has no decode entry point. Distinct from `unsupported`, which means it
-    /// could not encode the cell either.
     #[serde(skip_serializing_if = "Option::is_none")]
     decode_unsupported: Option<String>,
 
     // --- footprint ---
-    /// Memory the *loaded* tokenizer holds, measured in a dedicated child
-    /// process so one engine's arenas cannot be credited to another.
-    ///
-    /// Live heap, not RSS: see `tokbench_core::mem` for why RSS ranked the
-    /// engine holding the least as the one holding the most.
     #[serde(skip_serializing_if = "Option::is_none")]
     heap_load_mb: Option<f64>,
-    /// Live heap after a full encode pass — the loaded tokenizer plus whatever
-    /// caches it fills. The gap to `heap_load_mb` is the cache.
     #[serde(skip_serializing_if = "Option::is_none")]
     heap_encode_mb: Option<f64>,
-    /// Worker configuration used for the footprint measurement.
     #[serde(skip_serializing_if = "Option::is_none")]
     memory_threads: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     memory_parallelism: Option<String>,
-    /// Published size of the engine's own package — the `.crate` tarball, the
-    /// PyPI wheel, or the npm unpacked size. This is the dependency you take
-    /// on. From `scripts/package_size.py`.
     #[serde(skip_serializing_if = "Option::is_none")]
     crate_size_kb: Option<f64>,
-    /// Which registry and exact version the size above refers to.
     #[serde(skip_serializing_if = "Option::is_none")]
     package_ref: Option<String>,
-    /// Stripped bytes this engine adds to a minimal binary, over a no-engine
-    /// baseline. A different question from `crate_size_kb`: a small download
-    /// can compile to a lot, and vice versa. From `scripts/binsize.sh`.
     #[serde(skip_serializing_if = "Option::is_none")]
     binary_delta_kb: Option<f64>,
 
-    /// Multi-thread scaling curve, when the sweep ran for this cell.
     #[serde(skip_serializing_if = "Option::is_none")]
     scaling: Option<Vec<ScalePoint>>,
-    /// Padding modes this engine has no native support for, so no padded
-    /// measurement exists rather than an unpadded one wearing a padded label.
     #[serde(skip_serializing_if = "Option::is_none")]
     padding_unsupported: Option<Vec<String>>,
 
-    /// True when the corpus could not supply `reps + 1` disjoint slices, so
-    /// some text was encoded more than once inside the measurement. Such a
-    /// cell partly measures the engine's memoization; the dashboard flags it.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     reused_text: bool,
 
-    /// Call-level encode latency over distinct documents, when requested.
     #[serde(skip_serializing_if = "Option::is_none")]
     latency_p50_us: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -375,29 +241,15 @@ fn latency_documents(text: &str, max_bytes: usize, samples: usize) -> Vec<String
     documents
 }
 
-/// One point on an engine's scaling curve.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 struct ScalePoint {
     threads: usize,
     mbps: f64,
-    /// Percentage of perfect linear scaling from the 1-thread number. 100% =
-    /// each added core added a full core's worth of throughput.
-    ///
-    /// 0.0 means there was no 1-thread point to divide by: an engine whose
-    /// parallelism cannot be pinned to one thread has no baseline, and
-    /// inventing one from its widest point would report 100% for an engine
-    /// whose scaling is in fact unknown.
     efficiency_pct: f64,
-    /// `"off"` or `"longest"`. Points from different padding modes are NOT
-    /// comparable and must never be mixed in one curve.
     padding: String,
-    /// `"native-threads"` (the engine's own pool, via its batch API) or
-    /// `"independent-instances"` (one single-threaded engine instance per
-    /// harness thread).
     parallelism: String,
 }
 
-/// One entry of `package_sizes.json`.
 #[derive(Deserialize, Debug, Clone)]
 struct PackageSize {
     kb: Option<f64>,
@@ -416,31 +268,6 @@ struct Report {
     dataset_metadata: DatasetMetadata,
     results: Vec<EngineResult>,
     runs: Vec<Run>,
-}
-
-/// What a scripted engine prints on stdout. `python/harness.py` reproduces the
-/// Rust protocol exactly and emits this.
-#[derive(Deserialize, Debug)]
-struct ScriptedReport {
-    version: String,
-    lang: String,
-    secs: f64,
-    tokens: usize,
-    /// Bytes the runner actually encoded. Reported by the runner rather than
-    /// taken from the file size: the harness caps at `max_chunks`, so a large
-    /// corpus is only partly consumed and dividing by the full file size would
-    /// silently inflate every scripted engine's MB/s.
-    bytes: usize,
-    ids_hash: u64,
-    load_ms: f64,
-    #[serde(default)]
-    also_computes: String,
-    #[serde(default)]
-    internally_parallel: bool,
-    #[serde(default)]
-    phases: Option<BTreeMap<String, u64>>,
-    #[serde(default)]
-    unsupported: Option<String>,
 }
 
 fn list_dir(dir: &Path, want_dir: bool, ext: Option<&str>) -> Result<Vec<PathBuf>> {
@@ -540,21 +367,10 @@ fn format_scaling_efficiency(percent: f64) -> String {
     format!("{:.0}% observed", percent.round())
 }
 
-/// One engine's result for a cell, paired with the comparator's result for the
-/// same cell when `--compare-to` named one.
 type Compared<'a> = (&'a EngineResult, Option<&'a EngineResult>);
 
-/// Padding modes that get their own columns, in order.
-///
-/// Fixed rather than derived from the run so the table has the same shape
-/// whatever `--padding` was passed; a mode that was not measured renders `-`.
 const PADDING_COLUMNS: [&str; 2] = ["off", "longest"];
 
-/// The 1-thread point of ONE padding mode's curve.
-///
-/// `padding` is not optional and has no default: a curve is only a curve
-/// within a single padding mode, and a helper that scanned every point would
-/// silently pair a padded number with an unpadded one.
 fn scaling_first<'a>(result: &'a EngineResult, padding: &str) -> Option<&'a ScalePoint> {
     result
         .scaling
@@ -565,7 +381,6 @@ fn scaling_first<'a>(result: &'a EngineResult, padding: &str) -> Option<&'a Scal
         .find(|point| point.threads == 1)
 }
 
-/// The widest point of ONE padding mode's curve.
 fn scaling_last<'a>(result: &'a EngineResult, padding: &str) -> Option<&'a ScalePoint> {
     result
         .scaling
@@ -1501,12 +1316,7 @@ fn main() -> Result<()> {
     }
 
     let natives = registry::native();
-    let scripted = registry::scripted();
-    let known_engines: Vec<_> = natives
-        .iter()
-        .map(|(name, _)| *name)
-        .chain(scripted.iter().map(|(name, _)| *name))
-        .collect();
+    let known_engines: Vec<_> = natives.iter().map(|(name, _)| *name).collect();
     let all_engines = args.engine.iter().any(|requested| requested == "all");
     if all_engines && args.engine.len() != 1 {
         bail!("--engine all cannot be combined with another --engine value");
@@ -1532,16 +1342,6 @@ fn main() -> Result<()> {
         if args.engine.iter().any(|engine| engine == comparator) {
             bail!("--engine and --compare-to must name different engines");
         }
-    }
-    if measurement.is_some()
-        && !run_encode
-        && args
-            .engine
-            .iter()
-            .chain(args.compare_to.iter())
-            .any(|requested| scripted.iter().any(|(name, _)| requested == name))
-    {
-        bail!("decode, latency, scaling, and memory measurements currently support native engines only");
     }
     if run_decode && !natives.iter().any(|(name, _)| *name == registry::REFERENCE) {
         bail!(
@@ -1592,12 +1392,7 @@ fn main() -> Result<()> {
         }
     }
     let native_count = natives.iter().filter(|(name, _)| want(name)).count();
-    let scripted_count = if run_encode {
-        scripted.iter().filter(|(name, _)| want(name)).count()
-    } else {
-        0
-    };
-    if native_count + scripted_count == 0 {
+    if native_count == 0 {
         bail!("no selected engines support this measurement");
     }
 
@@ -1625,7 +1420,7 @@ fn main() -> Result<()> {
         };
         eprintln!(
             "tokbench measure {name}: {} engine(s) × {} model(s) × {} corpus/corpora, {}",
-            native_count + scripted_count,
+            native_count,
             models.len(),
             corpora.len(),
             measurement_detail
@@ -1633,10 +1428,8 @@ fn main() -> Result<()> {
         print_progress(0, cells, 0.0);
     } else {
         eprintln!(
-            "tokbench: {} engine(s) [{} native, {} scripted] × {} model(s) × {} corpus/corpora = {} cells, {}",
-            native_count + scripted_count,
+            "tokbench: {} engine(s) × {} model(s) × {} corpus/corpora = {} cells, {}",
             native_count,
-            scripted_count,
             models.len(),
             corpora.len(),
             cells,
@@ -1755,7 +1548,6 @@ fn main() -> Result<()> {
                             tokenizer_name: name.to_string(),
                             total_tokens_produced: 0,
                             mean_execution_time_seconds: 0.0,
-                            breakdown_nanoseconds: None,
                             engine_version: String::new(),
                             engine_lang: String::new(),
                             engine_class: String::new(),
@@ -1806,19 +1598,6 @@ fn main() -> Result<()> {
                         } else {
                             measure_latency(engine.as_mut(), &latency_docs, args.latency_bytes)
                         };
-
-                        // Stage breakdown on a separate, untimed pass so the
-                        // extra clock reads never inflate the headline.
-                        let mut phases = Phases::default();
-                        let mut any = false;
-                        if measurement.is_none() {
-                            for c in &chunks {
-                                if let Some(p) = engine.phases(c) {
-                                    phases.accumulate(p);
-                                    any = true;
-                                }
-                            }
-                        }
 
                         // Decode, on the same clock, over the reference's ids.
                         // Runs while this engine is still alive and warm, so
@@ -1975,12 +1754,6 @@ fn main() -> Result<()> {
                             mean_execution_time_seconds: measured
                                 .as_ref()
                                 .map_or(0.0, |value| value.secs),
-                            breakdown_nanoseconds: any.then_some(Breakdown {
-                                normalization: phases.normalization_ns,
-                                pre_tokenization: phases.pre_tokenization_ns,
-                                core_encoding: phases.core_encoding_ns,
-                                post_processing: phases.post_processing_ns,
-                            }),
                             engine_version: info.version.into(),
                             engine_lang: info.lang.into(),
                             engine_class: info.class.as_str().into(),
@@ -2010,22 +1783,6 @@ fn main() -> Result<()> {
                                 .map(|value| value.document_bytes),
                             ..Default::default()
                         });
-                    }
-                }
-            }
-
-            // Scripted engines: the interpreter re-runs the same protocol and
-            // reports back. Timed inside the interpreter, so process start-up
-            // and imports are excluded — but still a different class, and
-            // labelled as such.
-            if run_encode {
-                for (name, script) in &scripted {
-                    if !want(name) {
-                        continue;
-                    }
-                    match run_scripted(&args, name, script, &model, corpus_path) {
-                        Ok(r) => results.push(r),
-                        Err(e) => eprintln!("  {model_name}/{corpus_name} {name}: {e}"),
                     }
                 }
             }
@@ -2224,120 +1981,6 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-/// Run a scripted engine and adapt its report into an [`EngineResult`].
-fn run_scripted(
-    args: &Args,
-    name: &str,
-    script: &str,
-    model: &Model,
-    corpus: &Path,
-) -> Result<EngineResult> {
-    if !Path::new(script).exists() {
-        bail!("{script} not found");
-    }
-    let mut cmd = if script.ends_with(".mjs") {
-        let mut c = Command::new("node");
-        c.arg(script);
-        c
-    } else {
-        let mut c = Command::new(&args.python);
-        c.arg(script);
-        c
-    };
-    let out = cmd
-        .arg("--model")
-        .arg(&model.dir)
-        .arg("--corpus")
-        .arg(corpus)
-        .arg("--reps")
-        .arg(args.reps.to_string())
-        .arg("--chunk-bytes")
-        .arg(CHUNK_BYTES.to_string())
-        .arg("--max-chunks")
-        .arg(MAX_CHUNKS.to_string())
-        .output()
-        .with_context(|| format!("spawning {script}"))?;
-
-    if !out.status.success() {
-        bail!(
-            "{script} exited {}: {}",
-            out.status,
-            String::from_utf8_lossy(&out.stderr).trim()
-        );
-    }
-    let text = String::from_utf8_lossy(&out.stdout);
-    // The harness prints one JSON object as its last line, so an engine that
-    // chatters on stdout does not break parsing.
-    let line = text
-        .lines()
-        .rev()
-        .find(|l| l.trim_start().starts_with('{'))
-        .with_context(|| format!("{script} printed no JSON object"))?;
-    let r: ScriptedReport =
-        serde_json::from_str(line).with_context(|| format!("parsing {script} output: {line}"))?;
-
-    if let Some(why) = r.unsupported {
-        return Ok(EngineResult {
-            tokenizer_name: name.into(),
-            total_tokens_produced: 0,
-            mean_execution_time_seconds: 0.0,
-            breakdown_nanoseconds: None,
-            engine_version: r.version,
-            engine_lang: r.lang,
-            engine_class: "subprocess".into(),
-            also_computes: String::new(),
-            internally_parallel: false,
-            load_ms: r.load_ms,
-            mbps: 0.0,
-            ns_per_byte: 0.0,
-            ids_hash: String::new(),
-            verified: None,
-            unsupported: Some(why),
-            ..Default::default()
-        });
-    }
-
-    let bytes = r.bytes as f64;
-    let breakdown = r.phases.map(|p| Breakdown {
-        normalization: *p.get("normalization").unwrap_or(&0),
-        pre_tokenization: *p.get("pre_tokenization").unwrap_or(&0),
-        core_encoding: *p.get("core_encoding").unwrap_or(&0),
-        post_processing: *p.get("post_processing").unwrap_or(&0),
-    });
-
-    eprintln!(
-        "  {}/{} {name:<16} {:>8.1} MB/s  (scripted)",
-        model.name,
-        stem(corpus),
-        (bytes / (1024.0 * 1024.0)) / r.secs
-    );
-
-    Ok(EngineResult {
-        tokenizer_name: name.into(),
-        total_tokens_produced: r.tokens,
-        mean_execution_time_seconds: r.secs,
-        breakdown_nanoseconds: breakdown,
-        engine_version: r.version,
-        engine_lang: r.lang,
-        engine_class: "subprocess".into(),
-        also_computes: r.also_computes,
-        internally_parallel: r.internally_parallel,
-        load_ms: r.load_ms,
-        mbps: (bytes / (1024.0 * 1024.0)) / r.secs,
-        ns_per_byte: r.secs * 1e9 / bytes,
-        ids_hash: format!("{:016x}", r.ids_hash),
-        verified: None,
-        unsupported: None,
-        ..Default::default()
-    })
-}
-
-/// Child process: build ONE engine, load and warm it, report its resident
-/// memory, exit. Spawned once per engine by [`measure_memory`].
-///
-/// This must stay a separate process. Measuring several engines in one process
-/// lets the allocator hand engine B the pages engine A just freed, which
-/// reports B's footprint as near zero — see `tokbench_core::mem`.
 fn memory_child(args: &Args, name: &str) -> Result<()> {
     let dir = args
         .memory_model
@@ -2486,7 +2129,6 @@ fn memory_child(args: &Args, name: &str) -> Result<()> {
     Ok(())
 }
 
-/// The four footprint numbers a child reports. See `memory_child`.
 #[derive(Default)]
 struct Footprint {
     heap_load_mb: Option<f64>,
@@ -2501,7 +2143,6 @@ struct Footprint {
     unsupported: Option<String>,
 }
 
-/// Spawn one isolated child per repetition and take the median footprint.
 fn measure_memory_repeated(
     name: &str,
     model: &Model,
