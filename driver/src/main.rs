@@ -15,7 +15,6 @@ use tokbench_core::{
     vocabulary, Ids, Model, ScalingMode,
 };
 
-const CHUNK_BYTES: usize = 10 * 1024;
 const MAX_CHUNKS: usize = 100;
 
 #[derive(Subcommand, Clone, Copy, Debug, PartialEq, Eq)]
@@ -83,6 +82,10 @@ struct Args {
     /// Bytes of synthetic text per recurrence point.
     #[arg(long, default_value_t = 2 * 1024 * 1024, global = true)]
     recurrence_bytes: usize,
+
+    /// Bytes per document the corpus is cut into.
+    #[arg(long, default_value_t = 10 * 1024, global = true)]
+    document_bytes: usize,
 
     #[arg(long, global = true)]
     open: bool,
@@ -1680,7 +1683,7 @@ fn main() -> Result<()> {
                 eprintln!("  skip {corpus_name}: unreadable");
                 continue;
             };
-            let chunks = chunk(&text, CHUNK_BYTES, MAX_CHUNKS);
+            let chunks = chunk(&text, args.document_bytes, MAX_CHUNKS);
             let bytes: usize = chunks.iter().map(|c| c.len()).sum();
             let chars: usize = chunks.iter().map(|c| c.chars().count()).sum();
             let measure_scaling_for_corpus =
@@ -1690,7 +1693,7 @@ fn main() -> Result<()> {
             // scaling sweep to the legacy full run cannot silently change its
             // ordinary encode workload.
             let scaling_chunks =
-                measure_scaling_for_corpus.then(|| chunk(&text, CHUNK_BYTES, usize::MAX));
+                measure_scaling_for_corpus.then(|| chunk(&text, args.document_bytes, usize::MAX));
             let measure_latency_here =
                 run_latency || (measurement.is_none() && args.latency.contains(&corpus_name));
             let latency_docs = if measure_latency_here {
@@ -2225,7 +2228,7 @@ fn memory_child(args: &Args, name: &str) -> Result<()> {
         .with_context(|| format!("engine {name} not compiled into this binary"))?;
 
     let text = tokbench_core::read_corpus(&corpus).context("reading corpus")?;
-    let chunks = chunk(&text, CHUNK_BYTES, MAX_CHUNKS);
+    let chunks = chunk(&text, args.document_bytes, MAX_CHUNKS);
     let threads = args.memory_threads.map_or(1, NonZeroUsize::get);
     let base = tokbench_core::mem::live_heap();
     let cache_capacity = (name == "pipeline")
