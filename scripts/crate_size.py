@@ -17,7 +17,7 @@ import urllib.request
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-CURRENT_REVISION = "484be1d3351077fc5c0b81e876c94814c08ef3eb"
+CURRENT_REVISION = "76f57f25a39f139d92ae861db950b7830951e6d2"
 INITIAL_REVISION = "0e9bb9ca3bfebcc3892173a788d5fcda9e7bf2cd"
 STABLE = "1.97.1"
 NIGHTLY = "nightly-2026-08-05"

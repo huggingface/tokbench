@@ -28,7 +28,7 @@ ENGINES = {
     "llamacpp":       ("crates", [("llama-cpp-2", "0.1.154")]),
     "gigatoken":      ("pypi",   "gigatoken"),
     "executorch":     ("pypi",   "pytorch-tokenizers"),
-    "pipeline":       ("source", "tokenizers 1.0.0-rc.0 @ 5c3727a9 - unreleased source"),
+    "pipeline":       ("source", "tokenizers main @ 76f57f25 - unreleased source"),
     "iree":           ("source", "iree-org/iree - C source, built from the IREE tree"),
 }
 

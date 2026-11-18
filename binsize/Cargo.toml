@@ -34,10 +34,10 @@ tokbench-executorch = { path = "../engines/executorch", optional = true }
 
 # The crate-decomposition probe is pinned independently from the runtime
 # pipeline engine. These dependencies are exercised by `measure crate-size`.
-tk-encode-size = { package = "tk-encode", git = "https://github.com/huggingface/tokenizers", rev = "484be1d3351077fc5c0b81e876c94814c08ef3eb", default-features = false, optional = true }
-tk-serialize-size = { package = "tk-serialize", git = "https://github.com/huggingface/tokenizers", rev = "484be1d3351077fc5c0b81e876c94814c08ef3eb", default-features = false, features = ["bpe", "deserialize"], optional = true }
-tk-convert-size = { package = "tk-convert", git = "https://github.com/huggingface/tokenizers", rev = "484be1d3351077fc5c0b81e876c94814c08ef3eb", default-features = false, optional = true }
-tk-train-size = { package = "tk-train", git = "https://github.com/huggingface/tokenizers", rev = "484be1d3351077fc5c0b81e876c94814c08ef3eb", default-features = false, optional = true }
+tk-encode-size = { package = "tk-encode", git = "https://github.com/huggingface/tokenizers", rev = "76f57f25a39f139d92ae861db950b7830951e6d2", default-features = false, optional = true }
+tk-serialize-size = { package = "tk-serialize", git = "https://github.com/huggingface/tokenizers", rev = "76f57f25a39f139d92ae861db950b7830951e6d2", default-features = false, features = ["bpe", "deserialize"], optional = true }
+tk-convert-size = { package = "tk-convert", git = "https://github.com/huggingface/tokenizers", rev = "76f57f25a39f139d92ae861db950b7830951e6d2", default-features = false, optional = true }
+tk-train-size = { package = "tk-train", git = "https://github.com/huggingface/tokenizers", rev = "76f57f25a39f139d92ae861db950b7830951e6d2", default-features = false, optional = true }
 ahash = { version = "0.8.12", optional = true }
 
 [features]
@@ -60,7 +60,7 @@ executorch = ["dep:tokbench-executorch"]
 crate-bpe = ["dep:tk-encode-size", "tk-encode-size/bpe"]
 crate-serialize = ["dep:tk-serialize-size"]
 crate-convert = ["dep:tk-convert-size"]
-crate-train = ["dep:tk-train-size", "tk-encode-size/wordlevel"]
+crate-train = ["dep:tk-train-size", "tk-train-size/wordlevel"]
 crate-unigram = ["tk-encode-size/unigram"]
 crate-wordpiece = ["dep:ahash", "tk-encode-size/wordpiece"]
 crate-wordlevel = ["dep:ahash", "tk-encode-size/wordlevel"]
