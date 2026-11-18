@@ -1,10 +1,10 @@
-use tk_encode::pipeline::{EncodeOptions, Override, PipelineToken, PipelineTokenizer};
+use tk_encode::pipeline::{EncodeOptions, Override, Token, Tokenizer};
 use tk_encode::PaddingParams;
 use tokbench_core::{unsupported, Build, Class, Engine, Ids, Info, Model, Padding, Unsupported};
 
 pub struct Adapter {
-    tok: PipelineTokenizer,
-    scratch: Vec<PipelineToken>,
+    tok: Tokenizer,
+    scratch: Vec<Token>,
     name: &'static str,
     options: EncodeOptions,
     threads: usize,
@@ -48,9 +48,10 @@ fn build(
         tok,
         scratch: Vec::new(),
         name,
-        options: EncodeOptions {
-            add_special_tokens: false,
-            padding: Override::Off,
+        options: {
+            let mut options = EncodeOptions::no_specials();
+            options.padding = Override::Off;
+            options
         },
         threads: 1,
     }))
@@ -77,10 +78,10 @@ impl Engine for Adapter {
     fn info(&self) -> Info {
         Info {
             name: self.name,
-            version: "tk-encode 1.0.0-rc.0 (tokenizers-rc0 @ 199d9a13)",
+            version: "tk-encode 0.1.0-dev.2 (tokenizers main @ 76f57f25)",
             lang: "rust",
             class: Class::Native,
-            url: "https://github.com/huggingface/tokenizers/tree/199d9a1338b1ffe672549f4dd80be49af13fab92",
+            url: "https://github.com/huggingface/tokenizers/tree/76f57f25a39f139d92ae861db950b7830951e6d2",
             also_computes: "",
             internally_parallel: self.threads > 1,
         }
@@ -122,9 +123,10 @@ impl Engine for Adapter {
     fn set_padding(&mut self, padding: Padding) -> bool {
         self.options.padding = match padding {
             Padding::Off => Override::Off,
-            Padding::Longest => Override::With(PaddingParams {
-                pad_id: 0,
-                ..PaddingParams::default()
+            Padding::Longest => Override::With({
+                let mut params = PaddingParams::default();
+                params.pad_id = 0;
+                params
             }),
         };
         true

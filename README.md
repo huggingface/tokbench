@@ -179,7 +179,7 @@ disagree with the reference are marked `differ` and excluded from every ranking.
 | engine | lang | class | notes |
 |---|---|---|---|
 | [hf-tokenizers](engines/hf-tokenizers) | Rust | native | reference and oracle, `tokenizers` 0.23.1 |
-| [pipeline](engines/pipeline) | Rust | native | [tk-encode 1.0.0-rc.0](https://github.com/huggingface/tokenizers) |
+| [pipeline](engines/pipeline) | Rust | native | [tk-encode 0.1.0-dev.2 @ 76f57f25](https://github.com/huggingface/tokenizers/tree/76f57f25a39f139d92ae861db950b7830951e6d2) |
 | [kitoken](engines/kitoken) | Rust | native | BPE + Unigram + WordPiece |
 | [tokie](engines/tokie) | Rust | native | |
 | [tiktoken](engines/tiktoken) | Rust | native | needs a derived `ranks.tiktoken` |

@@ -1,13 +1,11 @@
 use std::collections::BTreeMap;
 use std::hint::black_box;
 
-use tk_encode_size::models::bpe::{BpeConfig, Merges, PipelineBPE, Vocab};
-use tk_encode_size::pipeline::{
-    EncodeOptions, PipelineModel, PipelinePostProcessor, PipelinePreTokenizer, PipelineTokenizer,
-};
+use tk_encode_size::models::bpe::{BpeConfig, Merges, Vocab, BPE};
+use tk_encode_size::pipeline::{EncodeOptions, Model, PostProcessor, PreTokenizer, Tokenizer};
 use tk_encode_size::vocab::bucket_added_vocabulary::AddedVocabulary;
 
-fn bpe_tokenizer(pre: PipelinePreTokenizer) -> PipelineTokenizer {
+fn bpe_tokenizer(pre: PreTokenizer) -> Tokenizer {
     let vocab: Vocab = [
         ("h", 0),
         ("e", 1),
@@ -25,23 +23,36 @@ fn bpe_tokenizer(pre: PipelinePreTokenizer) -> PipelineTokenizer {
         .into_iter()
         .map(|(left, right)| (left.to_owned(), right.to_owned()))
         .collect();
-    let model = PipelineBPE::from_config(BpeConfig {
-        vocab,
-        merges,
-        ..BpeConfig::default()
-    })
-    .unwrap();
-    PipelineTokenizer::from_parts(
+    let mut config = BpeConfig::default();
+    config.vocab = vocab;
+    config.merges = merges;
+    let model = BPE::from_config(config).unwrap();
+    Tokenizer::from_parts(
         AddedVocabulary::new(),
         Vec::new(),
         pre,
-        PipelineModel::BPE(model),
-        PipelinePostProcessor::default(),
+        Model::BPE(model),
+        PostProcessor::default(),
         None,
         BTreeMap::new(),
         None,
         None,
     )
+}
+
+#[cfg(any(
+    feature = "crate-unigram",
+    feature = "crate-wordpiece",
+    feature = "crate-wordlevel"
+))]
+fn tokenize<M: tk_encode_size::pipeline::Tokenize>(
+    model: &M,
+    text: &str,
+) -> Vec<tk_encode_size::pipeline::Token> {
+    let mut scratch = model.init_scratch();
+    let mut tokens = Vec::new();
+    model.tokenize(text, &mut scratch, &mut tokens).unwrap();
+    tokens
 }
 
 fn main() {
@@ -69,13 +80,13 @@ fn main() {
     let pre = {
         #[cfg(feature = "crate-unicode-scripts")]
         {
-            PipelinePreTokenizer::UnicodeScripts(
+            PreTokenizer::UnicodeScripts(
                 tk_encode_size::pre_tokenizers::unicode_scripts::UnicodeScripts::new(),
             )
         }
         #[cfg(not(feature = "crate-unicode-scripts"))]
         {
-            PipelinePreTokenizer::Whitespace(tk_encode_size::pre_tokenizers::whitespace::Whitespace)
+            PreTokenizer::Whitespace(tk_encode_size::pre_tokenizers::whitespace::Whitespace)
         }
     };
     let tokenizer = bpe_tokenizer(pre);
@@ -119,7 +130,7 @@ fn main() {
             false,
         )
         .unwrap();
-        black_box(model.tokenize("hello").unwrap());
+        black_box(tokenize(&model, "hello"));
     }
     #[cfg(feature = "crate-wordpiece")]
     {
@@ -127,11 +138,10 @@ fn main() {
             [("[UNK]".to_owned(), 0), ("hello".to_owned(), 1)]
                 .into_iter()
                 .collect();
-        let model = tk_encode_size::models::wordpiece::WordPiece::builder()
-            .vocab(vocab)
-            .build()
-            .unwrap();
-        black_box(model.tokenize("hello").unwrap());
+        let mut config = tk_encode_size::models::wordpiece::WordPieceConfig::default();
+        config.vocab = vocab;
+        let model = tk_encode_size::models::wordpiece::WordPiece::from_config(config).unwrap();
+        black_box(tokenize(&model, "hello"));
     }
     #[cfg(feature = "crate-wordlevel")]
     {
@@ -143,11 +153,11 @@ fn main() {
             .vocab(vocab)
             .build()
             .unwrap();
-        black_box(model.tokenize("hello").unwrap());
+        black_box(tokenize(&model, "hello"));
     }
     #[cfg(feature = "crate-normalizers")]
     {
-        use tk_encode_size::pipeline::Normalizer;
+        use tk_encode_size::pipeline::Normalize;
         black_box(
             tk_encode_size::normalizers::unicode::NFC
                 .normalize("e\u{301}", 0)
