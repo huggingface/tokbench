@@ -11,12 +11,13 @@ use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use serde::{Deserialize, Serialize};
 use tokbench_core::{
-    chunk, measure, measure_decode, measure_latency, measure_scaling_with_mode, synth_recurrence,
-    vocabulary, Ids, Model, ScalingMode,
+    chunk, measure_cold, measure_decode, measure_latency, measure_scaling_with_mode, measure_warm,
+    synth_recurrence, timed_reps, vocabulary, Ids, Model, ScalingMode,
 };
 
 const CHUNK_BYTES: usize = 10 * 1024;
-const MAX_CHUNKS: usize = 100;
+// About 1 MB. The corpora hold 5 MB, which gives one warm-up slice and four timed ones.
+const SLICE_CHUNKS: usize = 100;
 
 #[derive(Subcommand, Clone, Copy, Debug, PartialEq, Eq)]
 enum MeasureCommand {
@@ -52,7 +53,7 @@ struct Args {
     #[arg(long, default_value = "data/fixtures", global = true)]
     corpora: PathBuf,
 
-    #[arg(long, default_value_t = 5, global = true)]
+    #[arg(long, default_value_t = 4, global = true)]
     reps: usize,
 
     #[arg(long, global = true)]
@@ -81,7 +82,7 @@ struct Args {
     recurrence: Vec<f64>,
 
     /// Bytes of synthetic text per recurrence point.
-    #[arg(long, default_value_t = 2 * 1024 * 1024, global = true)]
+    #[arg(long, default_value_t = 5 * 1024 * 1024, global = true)]
     recurrence_bytes: usize,
 
     #[arg(long, global = true)]
@@ -179,6 +180,12 @@ struct EngineResult {
     internally_parallel: bool,
     load_ms: f64,
     mbps: f64,
+    // The slowest and fastest timed rep. Reps encode different slices, so this mixes noise with how
+    // much the corpus varies.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mbps_min: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mbps_max: Option<f64>,
     ns_per_byte: f64,
     ids_hash: String,
     verified: Option<bool>,
@@ -443,7 +450,7 @@ fn print_collapsed_measurement_table(
     headers.push("corpora".into());
     match measurement {
         MeasureCommand::Encode | MeasureCommand::Recurrence => {
-            headers.extend(["median MB/s", "median ns/B"].map(str::to_string))
+            headers.extend(["median MB/s", "median ns/B", "median rep spread"].map(str::to_string))
         }
         MeasureCommand::Decode => {
             headers.extend(["median MB/s", "median ns/token"].map(str::to_string))
@@ -516,6 +523,13 @@ fn print_collapsed_measurement_table(
                     median(complete.iter().map(|(r, _)| r.ns_per_byte).collect()),
                     2,
                 ));
+                let spreads: Vec<f64> = complete
+                    .iter()
+                    .filter_map(|(r, _)| Some(50.0 * (r.mbps_max? - r.mbps_min?) / r.mbps))
+                    .collect();
+                row.push(
+                    median(spreads).map_or_else(|| "-".into(), |spread| format!("±{spread:.1}%")),
+                );
                 if compare_to.is_some() {
                     let ratios = complete
                         .iter()
@@ -1022,7 +1036,7 @@ fn print_measurement_table(runs: &[Run], measurement: MeasureCommand, compare_to
     }
     match measurement {
         MeasureCommand::Encode | MeasureCommand::Recurrence => {
-            headers.extend(["MB/s", "ns/B", "tokens"].map(str::to_string))
+            headers.extend(["MB/s", "rep range MB/s", "ns/B", "tokens"].map(str::to_string))
         }
         MeasureCommand::Decode => headers.extend(["MB/s", "ns/token"].map(str::to_string)),
         MeasureCommand::Latency => {
@@ -1093,6 +1107,10 @@ fn print_measurement_table(runs: &[Run], measurement: MeasureCommand, compare_to
                     row.push(
                         unsupported.map_or_else(|| format!("{:.1}", result.mbps), |_| "-".into()),
                     );
+                    row.push(match (unsupported, result.mbps_min, result.mbps_max) {
+                        (None, Some(min), Some(max)) => format!("{min:.1}..{max:.1}"),
+                        _ => "-".into(),
+                    });
                     row.push(
                         unsupported
                             .map_or_else(|| format!("{:.2}", result.ns_per_byte), |_| "-".into()),
@@ -1680,17 +1698,12 @@ fn main() -> Result<()> {
                 eprintln!("  skip {corpus_name}: unreadable");
                 continue;
             };
-            let chunks = chunk(&text, CHUNK_BYTES, MAX_CHUNKS);
+            let chunks = chunk(&text, CHUNK_BYTES, usize::MAX);
             let bytes: usize = chunks.iter().map(|c| c.len()).sum();
             let chars: usize = chunks.iter().map(|c| c.chars().count()).sum();
             let measure_scaling_for_corpus =
                 run_scaling || (measurement.is_none() && args.scaling.contains(&corpus_name));
-            // Scaling needs enough unique input to keep all workers busy
-            // without replay. Keep this separate from `chunks` so adding a
-            // scaling sweep to the legacy full run cannot silently change its
-            // ordinary encode workload.
-            let scaling_chunks =
-                measure_scaling_for_corpus.then(|| chunk(&text, CHUNK_BYTES, usize::MAX));
+            let scaling_chunks = measure_scaling_for_corpus.then_some(&chunks);
             let measure_latency_here =
                 run_latency || (measurement.is_none() && args.latency.contains(&corpus_name));
             let latency_docs = if measure_latency_here {
@@ -1730,11 +1743,13 @@ fn main() -> Result<()> {
                     .unwrap_or_default()
             };
 
-            // Native engines: built, then timed in-process by core::measure.
-            for (name, ctor) in &natives {
-                if !want(name) {
-                    continue;
-                }
+            // The first engine changes from cell to cell, so a slow drift in machine speed (heat,
+            // other load) spreads over all engines instead of landing on the same one every time.
+            let mut order: Vec<&(&str, registry::Ctor)> =
+                natives.iter().filter(|(name, _)| want(name)).collect();
+            let first = done % order.len();
+            order.rotate_left(first);
+            for (name, ctor) in order {
                 // The dedicated footprint child supplies both metadata and
                 // measurements. Avoid loading every model once here only to
                 // load it again in the isolated process below.
@@ -1787,7 +1802,16 @@ fn main() -> Result<()> {
                         let measured = if run_encode {
                             let measured =
                                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                                    measure(engine.as_mut(), &chunks, args.reps, !args.no_warmup)
+                                    if args.no_warmup {
+                                        measure_cold(engine.as_mut(), &chunks)
+                                    } else {
+                                        measure_warm(
+                                            engine.as_mut(),
+                                            &chunks,
+                                            SLICE_CHUNKS,
+                                            args.reps,
+                                        )
+                                    }
                                 }));
                             let Ok(value) = measured else {
                                 if measurement.is_none() {
@@ -1844,7 +1868,7 @@ fn main() -> Result<()> {
                         // Runs after the single-thread timing so it can never
                         // perturb the headline number.
                         let (scaling, padding_unsupported) = if let Some(scaling_chunks) =
-                            &scaling_chunks
+                            scaling_chunks
                         {
                             // One sweep per padding mode. They are separate
                             // curves, never merged: an engine can scale well
@@ -1905,7 +1929,7 @@ fn main() -> Result<()> {
                         let scaling_identity = if run_scaling {
                             let identity =
                                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                                    measure(engine.as_mut(), &chunks, 1, false)
+                                    measure_cold(engine.as_mut(), &chunks)
                                 }));
                             let Ok(value) = identity else {
                                 results.push(EngineResult {
@@ -1981,6 +2005,8 @@ fn main() -> Result<()> {
                             internally_parallel: info.internally_parallel,
                             load_ms,
                             mbps: measured.as_ref().map_or(0.0, |value| value.mbps),
+                            mbps_min: measured.as_ref().map(|value| value.mbps_min),
+                            mbps_max: measured.as_ref().map(|value| value.mbps_max),
                             ns_per_byte: measured.as_ref().map_or(0.0, |value| value.ns_per_byte),
                             ids_hash: identity
                                 .map(|value| format!("{:016x}", value.ids_hash))
@@ -2006,6 +2032,12 @@ fn main() -> Result<()> {
                     }
                 }
             }
+
+            results.sort_by_key(|result| {
+                natives
+                    .iter()
+                    .position(|(name, _)| *name == result.tokenizer_name)
+            });
 
             // Verification: the reference's id hash is the oracle. An engine
             // that produced different ids did different work, and its speed
@@ -2079,7 +2111,11 @@ fn main() -> Result<()> {
                     total_characters: chars,
                     corpus: corpus_name,
                     model: model_name.clone(),
-                    reps: args.reps,
+                    reps: if args.no_warmup {
+                        1
+                    } else {
+                        timed_reps(chunks.len(), SLICE_CHUNKS, args.reps)
+                    },
                     warmup: !args.no_warmup,
                     pipeline_cache_capacity: args.cache_capacity,
                 },
@@ -2225,7 +2261,7 @@ fn memory_child(args: &Args, name: &str) -> Result<()> {
         .with_context(|| format!("engine {name} not compiled into this binary"))?;
 
     let text = tokbench_core::read_corpus(&corpus).context("reading corpus")?;
-    let chunks = chunk(&text, CHUNK_BYTES, MAX_CHUNKS);
+    let chunks = chunk(&text, CHUNK_BYTES, SLICE_CHUNKS);
     let threads = args.memory_threads.map_or(1, NonZeroUsize::get);
     let base = tokbench_core::mem::live_heap();
     let cache_capacity = (name == "pipeline")

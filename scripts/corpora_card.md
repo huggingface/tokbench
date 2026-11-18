@@ -96,22 +96,6 @@ configs:
     data_files:
       - split: train
         path: data/math-latex/train-*.parquet
-  - config_name: added-special-dense
-    data_files:
-      - split: train
-        path: data/added-special-dense/train-*.parquet
-  - config_name: added-special-sparse
-    data_files:
-      - split: train
-        path: data/added-special-sparse/train-*.parquet
-  - config_name: added-normalized-dense
-    data_files:
-      - split: train
-        path: data/added-normalized-dense/train-*.parquet
-  - config_name: added-normalized-sparse
-    data_files:
-      - split: train
-        path: data/added-normalized-sparse/train-*.parquet
   - config_name: chat-llama3
     data_files:
       - split: train
@@ -221,8 +205,6 @@ here is exactly a `--corpus` argument there.
 | `math-latex` | backslash-and-brace runs, long symbol sequences, deep punctuation nesting |
 | `agentic-swe` | agent trajectories: diffs, terminal output, tool calls, indentation runs |
 | `chat-llama3`, `chat-chatml`, `chat-mistral`, `chat-deepseek` | conversations rendered through each family's real Jinja `chat_template`, so the added-token matcher sees a special token every few hundred bytes, in that family's actual markers |
-| `added-special-*` | added/special tokens at high and low density — the added-token matcher in isolation |
-| `added-normalized-*` | added tokens that the normalizer rewrites, the path a lowercasing or accent-stripping normalizer takes |
 
 The four `chat-*` corpora are one per template *family*, not per model: a
 benchmark feeds every engine identical bytes per cell, and a per-model corpus

@@ -26,8 +26,6 @@ CORPORA_REPO ?= huggingface/tokbench-corpora
 FIXTURE_CORPORA := amharic arabic bengali chinese english georgian greek hebrew \
                    hindi japanese korean russian tamil thai \
                    agentic-swe math-latex \
-                   added-special-dense added-special-sparse \
-                   added-normalized-dense added-normalized-sparse \
                    chat-llama3 chat-chatml chat-mistral chat-deepseek
 
 # Not publicly redistributable, so these stay internal: code-mixed embeds redis
@@ -95,11 +93,11 @@ sizes:
 
 .PHONY: bench
 bench:
-	$(TOKBENCH) --reps 5
+	$(TOKBENCH) --reps 4
 
 .PHONY: bench-open
 bench-open:
-	$(TOKBENCH) --reps 5 --open
+	$(TOKBENCH) --reps 4 --open
 
 # One measurement family instead of the whole matrix.
 .PHONY: encode decode latency scaling memory

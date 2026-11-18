@@ -22,6 +22,8 @@ NUMERIC_FIELDS = {
     "latency_p50_us",
     "latency_p99_us",
     "mbps",
+    "mbps_max",
+    "mbps_min",
     "mean_execution_time_seconds",
     "ns_per_byte",
     "rss_delta_mb",

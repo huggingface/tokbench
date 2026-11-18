@@ -67,7 +67,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--flavor", default="cpu-performance")
     parser.add_argument("--timeout", default="6h")
     parser.add_argument("--runs", type=int, default=5)
-    parser.add_argument("--reps", type=int, default=5)
+    parser.add_argument("--reps", type=int, default=4)
     parser.add_argument(
         "--cache-capacity",
         type=int,
