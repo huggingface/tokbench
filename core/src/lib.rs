@@ -175,6 +175,8 @@ pub struct Measure {
     pub tokens: usize,
     pub ids_hash: u64,
     pub reused: bool,
+    pub mbps_min: f64,
+    pub mbps_max: f64,
 }
 
 #[derive(Clone, Debug)]
@@ -252,7 +254,7 @@ pub fn measure_latency(
     })
 }
 
-/// The number of reps [`measure`] times over `chunk_count` chunks.
+/// The number of reps [`measure_warm`] times over `chunk_count` chunks.
 ///
 /// One slice of `slice_chunks` chunks warms the engine up, and each rep encodes the next slice.
 /// A corpus too short for two slices replays the whole corpus on every rep, and
@@ -264,98 +266,106 @@ pub fn timed_reps(chunk_count: usize, slice_chunks: usize, reps: usize) -> usize
     }
 }
 
-pub fn measure(
+/// Warm encode throughput over one corpus.
+///
+/// The engine first encodes the warm-up slice, then rep `r` times slice `r`. Afterwards the
+/// engine encodes the whole corpus once, untimed, to hash its ids.
+pub fn measure_warm(
     engine: &mut dyn Engine,
     chunks: &[String],
     slice_chunks: usize,
     reps: usize,
-    warmup: bool,
 ) -> Measure {
+    let timed = timed_reps(chunks.len(), slice_chunks, reps);
+    let reused = chunks.len() / slice_chunks < 2;
+    let slice = |index: usize| -> &[String] {
+        if reused {
+            chunks
+        } else {
+            &chunks[index * slice_chunks..(index + 1) * slice_chunks]
+        }
+    };
     let mut out: Ids = Vec::with_capacity(64 * 1024);
-    let mut all: Ids = Vec::new();
-    let secs;
-    let bytes;
-    let mut reused = false;
+    encode_slice(engine, slice(0), &mut out);
 
-    if warmup {
-        // A fixed slice size times every corpus at the same point of a cache's warm-up.
-        let timed = timed_reps(chunks.len(), slice_chunks, reps);
-        reused = chunks.len() / slice_chunks < 2;
-        let slice = |i: usize| -> &[String] {
-            if reused {
-                chunks
-            } else {
-                &chunks[i * slice_chunks..(i + 1) * slice_chunks]
-            }
-        };
-
-        // Warm on slice 0; verification below hashes the whole corpus, so
-        // every engine is still hashed over identical text.
-        for c in slice(0) {
-            out.clear();
-            engine.encode(c, &mut out);
-        }
-
-        // Slices differ in byte count, so the comparable quantity is s/byte.
-        let mut spb = Vec::with_capacity(timed);
-        let mut timed_bytes = 0usize;
-        for r in 1..=timed {
-            let s = slice(r);
-            let sb: usize = s.iter().map(|c| c.len()).sum();
-            if sb == 0 {
-                continue;
-            }
-            let t0 = Instant::now();
-            for c in s {
-                out.clear();
-                engine.encode(c, &mut out);
-                std::hint::black_box(&out);
-            }
-            spb.push(t0.elapsed().as_secs_f64() / sb as f64);
-            timed_bytes = sb;
-        }
-        bytes = timed_bytes;
-        secs = median(spb) * bytes as f64;
-
-        // Verification pass over the entire corpus, untimed.
-        for c in chunks {
-            out.clear();
-            engine.encode(c, &mut out);
-            all.extend_from_slice(&out);
-        }
-    } else {
-        bytes = chunks.iter().map(|c| c.len()).sum();
-        // Exactly one cold pass exists per instance, so `reps` cannot apply:
-        // a second pass is warm by definition.
-        let t0 = Instant::now();
-        for c in chunks {
-            out.clear();
-            engine.encode(c, &mut out);
-            std::hint::black_box(&out);
-        }
-        secs = t0.elapsed().as_secs_f64();
-
-        // Ids captured afterwards so the harness's `extend` stays out of the
-        // cold number.
-        for c in chunks {
-            out.clear();
-            engine.encode(c, &mut out);
-            all.extend_from_slice(&out);
-        }
+    // Slices differ in byte count, so the comparable quantity is seconds per byte.
+    let mut seconds_per_byte: Vec<f64> = Vec::with_capacity(timed);
+    let mut bytes = 0;
+    for rep in 1..=timed {
+        let text = slice(rep);
+        bytes = text.iter().map(String::len).sum();
+        let started = Instant::now();
+        encode_slice(engine, text, &mut out);
+        seconds_per_byte.push(started.elapsed().as_secs_f64() / bytes as f64);
     }
+    let fastest = seconds_per_byte
+        .iter()
+        .copied()
+        .fold(f64::INFINITY, f64::min);
+    let slowest = seconds_per_byte.iter().copied().fold(0.0, f64::max);
+    let secs = median(seconds_per_byte) * bytes as f64;
 
-    let tokens = all.len();
-    let hash = ids_hash(&all);
-    drop(all);
+    let (tokens, ids_hash) = hash_ids(engine, chunks);
     Measure {
-        mbps: (bytes as f64 / (1024.0 * 1024.0)) / secs,
+        mbps: mebibytes(bytes) / secs,
         ns_per_byte: secs * 1e9 / bytes as f64,
         secs,
         bytes,
         tokens,
-        ids_hash: hash,
+        ids_hash,
         reused,
+        mbps_min: mebibytes(1) / slowest,
+        mbps_max: mebibytes(1) / fastest,
     }
+}
+
+/// Cold encode throughput: one timed pass over the whole corpus, then one to hash the ids.
+///
+/// Only the first pass of an instance is cold, so this takes no reps.
+pub fn measure_cold(engine: &mut dyn Engine, chunks: &[String]) -> Measure {
+    let mut out: Ids = Vec::with_capacity(64 * 1024);
+    let bytes: usize = chunks.iter().map(String::len).sum();
+    let started = Instant::now();
+    encode_slice(engine, chunks, &mut out);
+    let secs = started.elapsed().as_secs_f64();
+    // Hashed in a second pass so the harness's `extend` stays out of the timing.
+    let (tokens, ids_hash) = hash_ids(engine, chunks);
+    let mbps = mebibytes(bytes) / secs;
+    Measure {
+        mbps,
+        ns_per_byte: secs * 1e9 / bytes as f64,
+        secs,
+        bytes,
+        tokens,
+        ids_hash,
+        reused: false,
+        mbps_min: mbps,
+        mbps_max: mbps,
+    }
+}
+
+fn mebibytes(bytes: usize) -> f64 {
+    bytes as f64 / (1024.0 * 1024.0)
+}
+
+fn encode_slice(engine: &mut dyn Engine, slice: &[String], out: &mut Ids) {
+    for chunk in slice {
+        out.clear();
+        engine.encode(chunk, out);
+        std::hint::black_box(&out);
+    }
+}
+
+/// The token count and ids hash of the whole corpus.
+fn hash_ids(engine: &mut dyn Engine, chunks: &[String]) -> (usize, u64) {
+    let mut all: Ids = Vec::new();
+    let mut out: Ids = Vec::with_capacity(64 * 1024);
+    for chunk in chunks {
+        out.clear();
+        engine.encode(chunk, &mut out);
+        all.extend_from_slice(&out);
+    }
+    (all.len(), ids_hash(&all))
 }
 
 pub fn measure_decode(
@@ -916,7 +926,7 @@ mod tests {
             "chunking must not drop or duplicate bytes"
         );
 
-        let m = measure(&mut Bytes, &chunks, 1, 3, true);
+        let m = measure_warm(&mut Bytes, &chunks, 1, 3);
         // `bytes` is ONE timed slice, not the whole corpus: reps run on
         // disjoint slices, so there is no single duration covering everything.
         assert!(m.bytes > 0 && m.bytes <= text.len());
@@ -924,7 +934,7 @@ mod tests {
         assert_eq!(m.tokens, text.len(), "one id per byte, whole corpus");
         assert!(m.mbps > 0.0 && m.mbps.is_finite());
 
-        let again = measure(&mut Bytes, &chunks, 1, 1, true);
+        let again = measure_warm(&mut Bytes, &chunks, 1, 1);
         assert_eq!(m.ids_hash, again.ids_hash);
         assert_ne!(ids_hash(&[1, 2, 3]), ids_hash(&[3, 2, 1]));
     }
@@ -1011,15 +1021,16 @@ mod tests {
         assert!(chunks.len() >= 24);
 
         *SEEN.lock().unwrap() = Some(HashMap::new());
-        let m = measure(&mut Recording, &chunks, 4, 5, true);
+        let m = measure_warm(&mut Recording, &chunks, 4, 5);
         assert!(!m.reused, "24 chunks is enough for 5 reps + warm-up");
 
         let seen = SEEN.lock().unwrap().take().unwrap();
-        let worst = seen.values().copied().max().unwrap_or(0);
+        // The warm-up slice is never timed.
+        let worst = chunks[4..].iter().map(|c| seen[c]).max().unwrap_or(0);
         assert!(
             worst <= 2,
-            "a chunk was encoded {worst} times; timed slices must be disjoint \
-             (at most one timed/warm touch plus one verification touch)"
+            "a timed chunk was encoded {worst} times; timed slices must be disjoint \
+             (one timed touch plus one verification touch)"
         );
         assert_eq!(
             seen.len(),
@@ -1032,7 +1043,7 @@ mod tests {
     fn every_timed_rep_encodes_one_whole_slice() {
         let text = "x".repeat(24 * 1024);
         let chunks = chunk(&text, 1024, usize::MAX);
-        let m = measure(&mut Bytes, &chunks, 4, 3, true);
+        let m = measure_warm(&mut Bytes, &chunks, 4, 3);
         assert_eq!(m.bytes, 4 * 1024);
     }
 
@@ -1057,8 +1068,29 @@ mod tests {
         let text = "x".repeat(10 * 1024);
         let chunks = chunk(&text, 1024, usize::MAX);
         assert_eq!(timed_reps(chunks.len(), 4, 5), 1);
-        measure(&mut Counting, &chunks, 4, 5, true);
+        measure_warm(&mut Counting, &chunks, 4, 5);
+        // Warm-up, the timed slice, then verification.
         assert_eq!(CALLS.load(Ordering::Relaxed), 4 + 4 + 10);
+    }
+
+    #[test]
+    fn spread_brackets_the_median_rep() {
+        struct SlowOnSliceTwo;
+        impl Engine for SlowOnSliceTwo {
+            fn info(&self) -> Info {
+                Bytes.info()
+            }
+            fn encode(&mut self, text: &str, out: &mut Ids) {
+                let millis = if text.starts_with('2') { 40 } else { 10 };
+                std::thread::sleep(std::time::Duration::from_millis(millis));
+                Bytes.encode(text, out)
+            }
+        }
+
+        let chunks: Vec<String> = (0..4).map(|slice| format!("{slice}")).collect();
+        let m = measure_warm(&mut SlowOnSliceTwo, &chunks, 1, 3);
+        assert!(m.mbps_min < m.mbps && m.mbps <= m.mbps_max);
+        assert!(m.mbps_min < m.mbps_max / 2.0);
     }
 
     #[test]
