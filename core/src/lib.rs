@@ -252,7 +252,25 @@ pub fn measure_latency(
     })
 }
 
-pub fn measure(engine: &mut dyn Engine, chunks: &[String], reps: usize, warmup: bool) -> Measure {
+/// The number of reps [`measure`] times over `chunk_count` chunks.
+///
+/// One slice of `slice_chunks` chunks warms the engine up, and each rep encodes the next slice.
+/// A corpus too short for two slices replays the whole corpus on every rep, and
+/// [`Measure::reused`] says so.
+pub fn timed_reps(chunk_count: usize, slice_chunks: usize, reps: usize) -> usize {
+    match chunk_count / slice_chunks {
+        0 | 1 => reps,
+        slices => reps.min(slices - 1),
+    }
+}
+
+pub fn measure(
+    engine: &mut dyn Engine,
+    chunks: &[String],
+    slice_chunks: usize,
+    reps: usize,
+    warmup: bool,
+) -> Measure {
     let mut out: Ids = Vec::with_capacity(64 * 1024);
     let mut all: Ids = Vec::new();
     let secs;
@@ -260,18 +278,15 @@ pub fn measure(engine: &mut dyn Engine, chunks: &[String], reps: usize, warmup: 
     let mut reused = false;
 
     if warmup {
-        // reps timed slices + 1 warm-up slice, all disjoint.
-        let want = reps + 1;
-        let per = chunks.len() / want;
-        if per == 0 {
-            // Not enough distinct text; flag rather than replay silently.
-            reused = true;
-        }
-        let per = per.max(1);
+        // A fixed slice size times every corpus at the same point of a cache's warm-up.
+        let timed = timed_reps(chunks.len(), slice_chunks, reps);
+        reused = chunks.len() / slice_chunks < 2;
         let slice = |i: usize| -> &[String] {
-            let start = (i * per) % chunks.len().max(1);
-            let end = (start + per).min(chunks.len());
-            &chunks[start..end]
+            if reused {
+                chunks
+            } else {
+                &chunks[i * slice_chunks..(i + 1) * slice_chunks]
+            }
         };
 
         // Warm on slice 0; verification below hashes the whole corpus, so
@@ -282,10 +297,10 @@ pub fn measure(engine: &mut dyn Engine, chunks: &[String], reps: usize, warmup: 
         }
 
         // Slices differ in byte count, so the comparable quantity is s/byte.
-        let mut spb = Vec::with_capacity(reps);
+        let mut spb = Vec::with_capacity(timed);
         let mut timed_bytes = 0usize;
-        for r in 0..reps {
-            let s = slice(r + 1);
+        for r in 1..=timed {
+            let s = slice(r);
             let sb: usize = s.iter().map(|c| c.len()).sum();
             if sb == 0 {
                 continue;
@@ -901,7 +916,7 @@ mod tests {
             "chunking must not drop or duplicate bytes"
         );
 
-        let m = measure(&mut Bytes, &chunks, 3, true);
+        let m = measure(&mut Bytes, &chunks, 1, 3, true);
         // `bytes` is ONE timed slice, not the whole corpus: reps run on
         // disjoint slices, so there is no single duration covering everything.
         assert!(m.bytes > 0 && m.bytes <= text.len());
@@ -909,7 +924,7 @@ mod tests {
         assert_eq!(m.tokens, text.len(), "one id per byte, whole corpus");
         assert!(m.mbps > 0.0 && m.mbps.is_finite());
 
-        let again = measure(&mut Bytes, &chunks, 1, true);
+        let again = measure(&mut Bytes, &chunks, 1, 1, true);
         assert_eq!(m.ids_hash, again.ids_hash);
         assert_ne!(ids_hash(&[1, 2, 3]), ids_hash(&[3, 2, 1]));
     }
@@ -996,7 +1011,7 @@ mod tests {
         assert!(chunks.len() >= 24);
 
         *SEEN.lock().unwrap() = Some(HashMap::new());
-        let m = measure(&mut Recording, &chunks, 5, true);
+        let m = measure(&mut Recording, &chunks, 4, 5, true);
         assert!(!m.reused, "24 chunks is enough for 5 reps + warm-up");
 
         let seen = SEEN.lock().unwrap().take().unwrap();
@@ -1011,6 +1026,39 @@ mod tests {
             chunks.len(),
             "verification must still cover the whole corpus"
         );
+    }
+
+    #[test]
+    fn every_timed_rep_encodes_one_whole_slice() {
+        let text = "x".repeat(24 * 1024);
+        let chunks = chunk(&text, 1024, usize::MAX);
+        let m = measure(&mut Bytes, &chunks, 4, 3, true);
+        assert_eq!(m.bytes, 4 * 1024);
+    }
+
+    #[test]
+    fn a_short_corpus_runs_fewer_reps_than_asked() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        static CALLS: AtomicUsize = AtomicUsize::new(0);
+
+        struct Counting;
+        impl Engine for Counting {
+            fn info(&self) -> Info {
+                Bytes.info()
+            }
+            fn encode(&mut self, text: &str, out: &mut Ids) {
+                CALLS.fetch_add(1, Ordering::Relaxed);
+                Bytes.encode(text, out)
+            }
+        }
+
+        // 10 chunks hold two whole slices of 4: one warms up, one is timed.
+        let text = "x".repeat(10 * 1024);
+        let chunks = chunk(&text, 1024, usize::MAX);
+        assert_eq!(timed_reps(chunks.len(), 4, 5), 1);
+        measure(&mut Counting, &chunks, 4, 5, true);
+        assert_eq!(CALLS.load(Ordering::Relaxed), 4 + 4 + 10);
     }
 
     #[test]

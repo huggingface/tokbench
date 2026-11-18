@@ -224,7 +224,7 @@ machine-specific; what Jobs buys is reproducible invocation and variance.
 
 ```json
 {
-  "dataset_metadata": { "corpus": "english", "model": "gpt2", "reps": 5, "warmup": true },
+  "dataset_metadata": { "corpus": "english", "model": "gpt2", "reps": 4, "warmup": true },
   "results": [
     { "tokenizer_name": "tokie", "total_tokens_produced": 245277,
       "mean_execution_time_seconds": 0.0028, "mbps": 96.7, "ns_per_byte": 9.86,

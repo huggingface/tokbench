@@ -33,15 +33,8 @@ ROOT = Path(__file__).resolve().parent.parent
 FIXTURES = ROOT / "data" / "fixtures"
 CARD = Path(__file__).with_name("corpora_card.md")
 
-# Row boundary per corpus. Blank line is the document separator everywhere
-# except the added-token fixtures, which are one generated line per line.
+# Row boundary: a blank line separates documents.
 SEP = "\n\n"
-SEPS = {
-    "added-special-dense": "\n",
-    "added-special-sparse": "\n",
-    "added-normalized-dense": "\n",
-    "added-normalized-sparse": "\n",
-}
 
 # A corpus name is the .txt stem, the config name, and the `--corpus` argument.
 # One name everywhere. Provenance and licence: see the card.
@@ -49,8 +42,6 @@ CORPORA = [
     "amharic", "arabic", "bengali", "chinese", "english", "georgian", "greek",
     "hebrew", "hindi", "japanese", "korean", "russian", "tamil", "thai",
     "agentic-swe", "math-latex",
-    "added-special-dense", "added-special-sparse",
-    "added-normalized-dense", "added-normalized-sparse",
     "chat-llama3", "chat-chatml", "chat-mistral", "chat-deepseek",
 ]
 
@@ -84,17 +75,16 @@ def build(out, selected):
     total, t0, rows_all, bytes_all = len(selected), time.time(), 0, 0
     for i, name in enumerate(selected, 1):
         raw = (FIXTURES / f"{name}.txt").read_bytes()
-        sep = SEPS.get(name, SEP)
-        docs = raw.decode("utf-8").split(sep)
+        docs = raw.decode("utf-8").split(SEP)
         table = pa.table(
             {
                 "corpus": pa.array([name] * len(docs)),
                 "index": pa.array(range(len(docs)), pa.int32()),
-                "sep": pa.array([sep] * len(docs)),
+                "sep": pa.array([SEP] * len(docs)),
                 "text": pa.array(docs),
             }
         )
-        if sep.join(table.column("text").to_pylist()).encode("utf-8") != raw:
+        if SEP.join(table.column("text").to_pylist()).encode("utf-8") != raw:
             sys.exit(f"{name}: parquet round-trip is not byte-exact -- refusing to publish")
 
         shard = out / "data" / name

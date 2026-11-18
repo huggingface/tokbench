@@ -36,6 +36,7 @@
 - gigatoken cannot be faster on non-repeating input because there is nothing to hit — tested and confirmed.
 - Cross-engine medians use only cells every compared engine ran and verified.
 - Timed slices are disjoint, so no timed pass ever re-encodes text it has already seen.
+- Timed slices hold a fixed ~1 MB, so every corpus is timed at the same point of a cache's warm-up: one warm-up slice, then one slice per rep.
 
 ## Corpora
 
