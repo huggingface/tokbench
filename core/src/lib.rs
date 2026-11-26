@@ -589,6 +589,20 @@ impl Scaling {
     }
 }
 
+static START_GATE: std::sync::OnceLock<fn()> = std::sync::OnceLock::new();
+
+/// Called right before every timed scaling sample, after warm-up, so processes measured together
+/// start each sample in step.
+pub fn set_start_gate(gate: fn()) {
+    let _ = START_GATE.set(gate);
+}
+
+fn start_gate() {
+    if let Some(gate) = START_GATE.get() {
+        gate();
+    }
+}
+
 pub fn measure_scaling(
     make: &(dyn Fn() -> Option<Box<dyn Engine>> + Sync),
     chunks: &[String],
@@ -782,6 +796,7 @@ fn time_native_threads(
     engine.encode_batch(warm, &mut buf);
     buf.clear();
 
+    start_gate();
     let t0 = Instant::now();
     engine.encode_batch(measured, &mut buf);
     let elapsed = t0.elapsed().as_secs_f64();
@@ -841,6 +856,7 @@ fn time_independent_instances(
                 done.wait();
             });
         }
+        start_gate();
         let t0 = Instant::now();
         start.wait();
         done.wait();
@@ -1091,6 +1107,19 @@ mod tests {
         for p in &pts {
             assert!(p.mbps > 0.0 && p.mbps.is_finite());
         }
+    }
+
+    #[test]
+    fn the_start_gate_opens_once_per_timed_sample() {
+        use std::cell::Cell;
+        thread_local!(static OPENED: Cell<usize> = const { Cell::new(0) });
+        // Other tests share the gate; they run on their own threads.
+        set_start_gate(|| OPENED.with(|n| n.set(n.get() + 1)));
+
+        let chunks = vec!["unit-test chunk ".repeat(100); 6];
+        let make = || Some(Box::new(Bytes) as Box<dyn Engine>);
+        measure_scaling(&make, &chunks, &[1, 2], 3, Padding::Off).unwrap();
+        assert_eq!(OPENED.with(Cell::get), 2 * 3);
     }
 
     #[test]

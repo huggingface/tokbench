@@ -1,10 +1,10 @@
 mod registry;
 
 use std::collections::BTreeMap;
-use std::io::{self, IsTerminal, Write};
+use std::io::{self, BufRead, BufReader, IsTerminal, Write};
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::time::Instant;
 
 use anyhow::{bail, Context, Result};
@@ -12,7 +12,7 @@ use clap::{Parser, Subcommand};
 use serde::{Deserialize, Serialize};
 use tokbench_core::{
     chunk, measure, measure_decode, measure_latency, measure_scaling_with_mode, synth_recurrence,
-    vocabulary, Ids, Model, ScalingMode,
+    vocabulary, Ids, Model, Padding, Scaling, ScalingKind, ScalingMode, ThreadPoint,
 };
 
 const MAX_CHUNKS: usize = 100;
@@ -125,6 +125,11 @@ struct Args {
     )]
     scaling_mode: String,
 
+    /// Run each scaling sample in this many processes at once, one engine each, and report their
+    /// combined throughput.
+    #[arg(long, default_value_t = NonZeroUsize::MIN, global = true)]
+    processes: NonZeroUsize,
+
     #[arg(
         long = "padding",
         value_parser = ["off", "longest", "both"],
@@ -148,6 +153,16 @@ struct Args {
     memory_corpus: Option<PathBuf>,
     #[arg(long, hide = true)]
     memory_threads: Option<NonZeroUsize>,
+
+    // --- internal: one of `--processes` scaling workers. ---
+    #[arg(long, hide = true)]
+    scaling_worker: Option<String>,
+    #[arg(long, hide = true)]
+    worker_model: Option<PathBuf>,
+    #[arg(long, hide = true)]
+    worker_corpus: Option<PathBuf>,
+    #[arg(long, hide = true, value_delimiter = ',')]
+    worker_threads: Vec<usize>,
 }
 
 // ---------------------------------------------------------------------------
@@ -166,6 +181,8 @@ struct DatasetMetadata {
     warmup: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pipeline_cache_capacity: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    scaling_processes: Option<usize>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
@@ -1429,11 +1446,17 @@ fn main() -> Result<()> {
     if !run_memory_atomic && args.threads.get() != 1 {
         bail!("--threads is available with `tokbench measure memory` only");
     }
+    if args.processes.get() > 1 && !run_scaling && args.scaling.is_empty() {
+        bail!("--processes is available with scaling measurements only");
+    }
 
     // Child mode short-circuits everything: this process exists to load one
     // engine and report its memory, so it must not touch any other.
     if let Some(name) = args.memory.clone() {
         return memory_child(&args, &name);
+    }
+    if let Some(name) = args.scaling_worker.clone() {
+        return scaling_worker(&args, &name);
     }
 
     // Stripped per-engine binary sizes, if `scripts/binsize.sh` has run.
@@ -1582,16 +1605,13 @@ fn main() -> Result<()> {
         "longest" => vec![tokbench_core::Padding::Longest],
         _ => vec![tokbench_core::Padding::Off, tokbench_core::Padding::Longest],
     };
-    let scaling_mode = match args.scaling_mode.as_str() {
-        "native-threads" => ScalingMode::NativeThreads,
-        "independent-instances" => ScalingMode::IndependentInstances,
-        _ => ScalingMode::Auto,
-    };
+    let scaling_mode = scaling_mode(&args.scaling_mode);
     if !args.scaling.is_empty() {
         eprintln!(
-            "scaling sweep on {:?} at thread counts {:?}, padding {:?}",
+            "scaling sweep on {:?} at thread counts {:?} in {} process(es), padding {:?}",
             args.scaling,
             thread_sweep,
+            args.processes,
             padding_modes
                 .iter()
                 .map(|padding| padding.as_str())
@@ -1623,7 +1643,10 @@ fn main() -> Result<()> {
             format!("up to {} distinct samples each", args.latency_samples)
         }
         Some(MeasureCommand::Scaling) => {
-            format!("thread counts {thread_sweep:?}, {} reps", args.reps)
+            format!(
+                "thread counts {thread_sweep:?} in {} process(es), {} reps",
+                args.processes, args.reps
+            )
         }
         Some(MeasureCommand::Memory) => format!(
             "{} worker(s), {} parallelism, median of {} isolated runs",
@@ -1856,15 +1879,27 @@ fn main() -> Result<()> {
                             let mut points: Vec<ScalePoint> = Vec::new();
                             let mut missing: Vec<String> = Vec::new();
                             for &padding in &padding_modes {
-                                let make = || ctor(&model, engine_cache_capacity).ok();
-                                let curve = measure_scaling_with_mode(
-                                    &make,
-                                    scaling_chunks,
-                                    &thread_sweep,
-                                    args.reps,
-                                    padding,
-                                    scaling_mode,
-                                );
+                                let curve = if args.processes.get() > 1 {
+                                    measure_scaling_in_processes(
+                                        &args,
+                                        name,
+                                        &model,
+                                        corpus_path,
+                                        &thread_sweep,
+                                        padding,
+                                        engine_cache_capacity,
+                                    )?
+                                } else {
+                                    let make = || ctor(&model, engine_cache_capacity).ok();
+                                    measure_scaling_with_mode(
+                                        &make,
+                                        scaling_chunks,
+                                        &thread_sweep,
+                                        args.reps,
+                                        padding,
+                                        scaling_mode,
+                                    )
+                                };
                                 let Some(curve) = curve else {
                                     // No native support for this padding mode.
                                     missing.push(padding.as_str().to_string());
@@ -2085,6 +2120,7 @@ fn main() -> Result<()> {
                     reps: args.reps,
                     warmup: !args.no_warmup,
                     pipeline_cache_capacity: args.cache_capacity,
+                    scaling_processes: (args.processes.get() > 1).then_some(args.processes.get()),
                 },
                 results,
             });
@@ -2205,6 +2241,187 @@ fn main() -> Result<()> {
             );
         }
     }
+    Ok(())
+}
+
+fn scaling_mode(name: &str) -> ScalingMode {
+    match name {
+        "native-threads" => ScalingMode::NativeThreads,
+        "independent-instances" => ScalingMode::IndependentInstances,
+        _ => ScalingMode::Auto,
+    }
+}
+
+/// Runs one scaling sweep in `--processes` workers, starting each sample in all of them at once.
+/// A point's throughput is the slowest worker's times the number of workers: all of them encoded
+/// the same bytes, and the sample lasts until the last one is done.
+fn measure_scaling_in_processes(
+    args: &Args,
+    name: &str,
+    model: &Model,
+    corpus: &Path,
+    threads: &[usize],
+    padding: Padding,
+    cache_capacity: Option<usize>,
+) -> Result<Option<Scaling>> {
+    let exe = std::env::current_exe()?;
+    let threads_arg = threads
+        .iter()
+        .map(usize::to_string)
+        .collect::<Vec<_>>()
+        .join(",");
+    let mut workers = Vec::new();
+    for _ in 0..args.processes.get() {
+        let mut command = Command::new(&exe);
+        command
+            .arg("--scaling-worker")
+            .arg(name)
+            .arg("--worker-model")
+            .arg(&model.dir)
+            .arg("--worker-corpus")
+            .arg(corpus)
+            .arg("--worker-threads")
+            .arg(&threads_arg)
+            .arg("--reps")
+            .arg(args.reps.to_string())
+            .arg("--document-bytes")
+            .arg(args.document_bytes.to_string())
+            .arg("--padding")
+            .arg(padding.as_str())
+            .arg("--scaling-mode")
+            .arg(&args.scaling_mode)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped());
+        if let Some(capacity) = cache_capacity {
+            command.arg("--cache-capacity").arg(capacity.to_string());
+        }
+        let mut child = command.spawn().context("starting a scaling worker")?;
+        let stdin = child.stdin.take().context("worker stdin")?;
+        let lines = BufReader::new(child.stdout.take().context("worker stdout")?).lines();
+        workers.push((child, stdin, lines));
+    }
+
+    // Every worker runs the same samples, so each says `ready` before each one, then a curve.
+    let mut curves = Vec::new();
+    loop {
+        let mut ready = 0;
+        for (_, _, lines) in &mut workers {
+            let line = loop {
+                let line = lines.next().context("a scaling worker exited early")??;
+                if line == "ready" || line.starts_with('{') {
+                    break line;
+                }
+            };
+            if line == "ready" {
+                ready += 1;
+            } else {
+                curves.push(serde_json::from_str::<serde_json::Value>(&line)?);
+            }
+        }
+        if ready == 0 {
+            break;
+        }
+        if ready != workers.len() {
+            bail!("scaling workers fell out of step");
+        }
+        for (_, stdin, _) in &mut workers {
+            writeln!(stdin, "go")?;
+            stdin.flush()?;
+        }
+    }
+    for (child, ..) in &mut workers {
+        child.wait()?;
+    }
+
+    let Some(kind) = curves[0]["parallelism"].as_str() else {
+        return Ok(None);
+    };
+    let kind = match kind {
+        "native-threads" => ScalingKind::NativeThreads,
+        _ => ScalingKind::IndependentInstances,
+    };
+    let mut points: Vec<ThreadPoint> = Vec::new();
+    for (i, threads) in curves[0]["threads"]
+        .as_array()
+        .context("worker curve")?
+        .iter()
+        .enumerate()
+    {
+        let slowest = curves
+            .iter()
+            .filter_map(|curve| curve["mbps"][i].as_f64())
+            .fold(f64::INFINITY, f64::min);
+        points.push(ThreadPoint {
+            threads: threads.as_u64().context("worker curve")? as usize,
+            mbps: slowest * curves.len() as f64,
+            efficiency_pct: 0.0,
+        });
+    }
+    if let Some(base) = points.iter().find(|p| p.threads == 1).map(|p| p.mbps) {
+        for point in &mut points {
+            point.efficiency_pct = point.mbps / (base * point.threads as f64) * 100.0;
+        }
+    }
+    Ok(Some(Scaling {
+        kind,
+        padding,
+        points,
+    }))
+}
+
+/// One of `--processes` workers: measures one engine's scaling curve, waiting for the parent's
+/// `go` before each sample, and prints the curve as JSON.
+fn scaling_worker(args: &Args, name: &str) -> Result<()> {
+    let dir = args
+        .worker_model
+        .clone()
+        .context("--worker-model required")?;
+    let corpus = args
+        .worker_corpus
+        .clone()
+        .context("--worker-corpus required")?;
+    let model = Model {
+        name: directory_name(&dir),
+        dir,
+    };
+    let ctor = registry::native()
+        .into_iter()
+        .find(|(n, _)| *n == name)
+        .map(|(_, c)| c)
+        .with_context(|| format!("engine {name} not compiled into this binary"))?;
+    let text = tokbench_core::read_corpus(&corpus).context("reading corpus")?;
+    let chunks = chunk(&text, args.document_bytes, usize::MAX);
+    let padding = match args.padding.as_str() {
+        "longest" => Padding::Longest,
+        _ => Padding::Off,
+    };
+    let cache_capacity = (name == "pipeline")
+        .then_some(args.cache_capacity)
+        .flatten();
+
+    tokbench_core::set_start_gate(|| {
+        println!("ready");
+        let _ = io::stdout().flush();
+        let _ = io::stdin().read_line(&mut String::new());
+    });
+    let make = || ctor(&model, cache_capacity).ok();
+    let curve = measure_scaling_with_mode(
+        &make,
+        &chunks,
+        &args.worker_threads,
+        args.reps,
+        padding,
+        scaling_mode(&args.scaling_mode),
+    );
+    let json = match curve {
+        Some(curve) => serde_json::json!({
+            "parallelism": curve.kind.as_str(),
+            "threads": curve.points.iter().map(|p| p.threads).collect::<Vec<_>>(),
+            "mbps": curve.points.iter().map(|p| p.mbps).collect::<Vec<_>>(),
+        }),
+        None => serde_json::json!({ "unsupported": true }),
+    };
+    println!("{json}");
     Ok(())
 }
 

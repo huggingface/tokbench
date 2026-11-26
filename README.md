@@ -126,6 +126,8 @@ entry point means `decode_unsupported`, absent from the ranking rather than
 zero in it.
 
 Scaling curves are labelled `native-threads` or `independent-instances`.
+`--processes N` runs every scaling sample in N processes started together and
+reports their combined throughput, so N processes × M threads is one curve.
 `--padding off|longest|both` is an axis; the harness never pads on an engine's
 behalf. `--cache-capacity N` sizes the tokenizers v1 BPE cache and `0` disables
 it; every engine is also registered as `<name>-no-cache`, and
